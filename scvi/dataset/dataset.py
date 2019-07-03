@@ -406,6 +406,86 @@ class GeneExpressionDataset(Dataset):
         return result
 
     @staticmethod
+    def concat_datasets_union(*gene_datasets, on='gene_names', shared_labels=True, shared_batches=False):
+        """
+        Combines multiple unlabelled gene_datasets based on the union of gene names intersection.
+        Datasets should all have gene_dataset.n_labels=0.
+        Batch indices are generated in the same order as datasets are given.
+        :param gene_datasets: a sequence of gene_datasets object
+        :return: a GeneExpressionDataset instance of the concatenated datasets
+        """
+        assert all([hasattr(gene_dataset, on) for gene_dataset in gene_datasets])
+
+        gene_names_ref = set()
+        gene_names = []
+        # add all gene names in the order they appear in the datasets
+        for gene_dataset in gene_datasets:
+            for name in list(set(getattr(gene_dataset, on))):
+                if name not in gene_names_ref:
+                    gene_names.append(name)
+                gene_names_ref.add(name)
+
+        print("All genes used %d" % len(gene_names))
+
+        new_shape = (sum(len(dataset) for dataset in gene_datasets), len(gene_names))
+        if sum((data.dense for data in gene_datasets)) > 0.5:
+            # most datasets provided are dense
+            X = np.zeros(new_shape, dtype=float)
+        else:
+            X = sp_sparse.csr_matrix(new_shape, dtype=float)
+        start_row = 0
+        # build a new dataset out of all datasets
+        for dataset in gene_datasets:
+            ds_len = len(dataset)
+            subset_genes = GeneExpressionDataset._available_genes(dataset, gene_names, on=on)
+            X[start_row:start_row + ds_len, subset_genes] = dataset.X
+            start_row += ds_len
+
+        if not any([gene_dataset.dense for gene_dataset in gene_datasets]):
+            X = sp_sparse.csr_matrix(X)
+
+        batch_indices = np.zeros((X.shape[0], 1))
+        n_batch_offset = 0
+        current_index = 0
+        for gene_dataset in gene_datasets:
+            next_index = current_index + len(gene_dataset)
+            batch_indices[current_index:next_index] = gene_dataset.batch_indices + n_batch_offset
+            n_batch_offset += (gene_dataset.n_batches if not shared_batches else 0)
+            current_index = next_index
+
+        cell_types = None
+        if shared_labels:
+            if all([hasattr(gene_dataset, "cell_types") for gene_dataset in gene_datasets]):
+                cell_types = list(
+                    set([cell_type for gene_dataset in gene_datasets for cell_type in gene_dataset.cell_types])
+                )
+                labels = []
+                for gene_dataset in gene_datasets:
+                    mapping = [cell_types.index(cell_type) for cell_type in gene_dataset.cell_types]
+                    labels += [arrange_categories(gene_dataset.labels, mapping_to=mapping)[0]]
+                labels = np.concatenate(labels)
+            else:
+                labels = np.concatenate([gene_dataset.labels for gene_dataset in gene_datasets])
+        else:
+            labels = np.zeros((X.shape[0], 1))
+            n_labels_offset = 0
+            current_index = 0
+            for gene_dataset in gene_datasets:
+                next_index = current_index + len(gene_dataset)
+                labels[current_index:next_index] = gene_dataset.labels + n_labels_offset
+                n_labels_offset += gene_dataset.n_labels
+                current_index = next_index
+
+        local_means = np.concatenate([gene_dataset.local_means for gene_dataset in gene_datasets])
+        local_vars = np.concatenate([gene_dataset.local_vars for gene_dataset in gene_datasets])
+        result = GeneExpressionDataset(X, local_means, local_vars, batch_indices, labels,
+                                       gene_names=gene_names, cell_types=cell_types)
+        result.barcodes = [gene_dataset.barcodes if hasattr(gene_dataset, 'barcodes') else None
+                           for gene_dataset in gene_datasets]
+        return result
+
+
+    @staticmethod
     def _filter_genes(gene_dataset, gene_names_ref, on='gene_names'):
         """
         :return: gene_dataset.X filtered by the corresponding genes ( / columns / features), idx_genes
