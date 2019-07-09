@@ -21,7 +21,6 @@ import anndata
 import os.path
 import torch
 
-use_cuda = False
 
 
 def concat_datasets_10x(save_path):
@@ -37,9 +36,8 @@ def concat_datasets_10x(save_path):
     return datasets_10x_merged
 
 
-def train_vae(dataset, save_path, use_cuda=None, n_epochs=100, lr=0.01):
+def train_vae(dataset, save_path, use_cuda=torch.cuda.is_available(), n_epochs=100, lr=0.01):
     use_batches = False
-    use_cuda = torch.cuda.is_available() if use_cuda is None else use_cuda
     vae = VAE(dataset.nb_genes, n_batch=dataset.n_batches * use_batches)
     trainer = UnsupervisedTrainer(
         vae,

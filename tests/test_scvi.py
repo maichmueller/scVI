@@ -323,3 +323,7 @@ def test_new_10x():
     data = Dataset10X('pbmc_1k_v2')
     data.subsample_genes(new_n_genes=100)
     assert data.X.shape[1] == 100
+
+
+if __name__ == '__main__':
+    test_sampling_zl('data/')
