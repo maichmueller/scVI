@@ -13,6 +13,6 @@ if __name__ == '__main__':
     avail_dsets.extend(
         (elem for elem in zip([None]*5, (CortexDataset, PbmcDataset, HematoDataset, BrainLargeDataset, CbmcDataset)))
     )
-    #convert_to_hdf5(avail_dsets, "/Users/b260-admin/Documents/GitHub/scVI/tests/data", "all")
+    convert_to_hdf5(avail_dsets, "/Users/b260-admin/Documents/GitHub/scVI/tests/data", "all")
     x = HDF5Dataset('"/Users/b260-admin/Documents/GitHub/scVI/tests/data/', False, False)
     x[2]
