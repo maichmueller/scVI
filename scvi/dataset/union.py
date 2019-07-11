@@ -3,22 +3,21 @@ import pandas as pd
 from datetime import datetime
 import warnings
 from scipy import sparse
-from .dataset import GeneExpressionDataset
+from .dataset import *
 from .dataset_hdf import HDF5Dataset, convert_to_hdf5
 import torch
-from torch.utils import data
+from torch.utils.data import Dataset
 from collections import defaultdict
+import sys
 
 
-class IndepUnionDataset(data.dataset):
+class IndepUnionDataset(Dataset):
 
     def __init__(self, save_path, low_memory=True,
                  load_map_fname=None, save_mapping_fname=None,
                  data_fname=None, data_savename=None, col_width=None):
-        self.data = None
 
         self.gene_map = dict()
-        self.index_map = []
         self.gene_names, self.gene_names_len = [], 0
 
         self.datasets_used = None
@@ -40,20 +39,28 @@ class IndepUnionDataset(data.dataset):
         #     self.hdf5_handler = HDF5Dataset(hdf5_data_fname, False, low_memory, **kwargs)
         # else:
         #     self.hdf5_handler = None
+        if low_memory:
+            super().__init__([], [], [], [], [])
+        else:
+            self.concat_datasets_union()
+            pass
 
-    def build_mapping(self, dataset_names, dataset_classes, dataset_args):
+    def build_mapping(self, dataset_names, dataset_classes, dataset_args=None, **kwargs):
         if self.gene_map:
-            if self.data is None:
-                self.concat_to_fwf(dataset_names, dataset_classes, dataset_args, save_path=self.save_path,
-                                   out_fname=self.data_savename)
+            if self.low_memory and self.X is None:
+                self.concat_to_fwf(dataset_names, dataset_classes, dataset_args,
+                                   out_fname=self.data_savename, **kwargs)
             else:
                 print(f'Mapping and data already built/loaded (potentially from '
                       f'files {self.data_fname} and {self.load_map_fname}).')
             return
 
+        if dataset_args is None:
+            dataset_args = [None] * len(dataset_names)
+
         filtered_classes = defaultdict(list)
         for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args):
-            if ds_args:
+            if ds_args is not None:
                 dataset = ds_class(ds_name, save_path=self.save_path, **ds_args)
             else:
                 dataset = ds_class(ds_name, save_path=self.save_path)
@@ -64,18 +71,19 @@ class IndepUnionDataset(data.dataset):
                 continue
 
             filtered_classes[str(ds_class)].append(str(ds_name))
-            self.index_map.append([(ds_name, ds_class) for _ in range(len(self.index_map),
-                                                                      len(self.index_map) + len(dataset.X))])
+
+            print("Extending gene list...", end="")
+            sys.stdout.flush()
             gns = getattr(dataset, "gene_names")
             for gn in gns:
                 if gn not in self.gene_names:
                     self.gene_map[gn] = self.gene_names_len
                     self.gene_names.append(gn)
                     self.gene_names_len += 1
-
+            print("done!")
+            sys.stdout.flush()
         self.datasets_used = filtered_classes
 
-    @staticmethod
     def type_handler_dispatch(func):
         def wrapped(self, dataset, *args, **kwargs):
             ds_type = type(dataset)
@@ -130,7 +138,7 @@ class IndepUnionDataset(data.dataset):
         return data_out
 
     def __len__(self):
-        return len(self.index_map)
+        return len(self.gene_map)
 
     def __getitem__(self, idx):
         return idx
@@ -174,7 +182,10 @@ class IndepUnionDataset(data.dataset):
                 torch.LongTensor(batch_indices_sample),
                 torch.LongTensor(labels_sample))
 
-    def concat_to_fwf(self, dataset_names, dataset_classes, dataset_args, save_path, out_fname=None, col_width=16):
+    def concat_to_fwf(self, dataset_names, dataset_classes, dataset_args=None, out_fname=None, col_width=16,
+                      **kwargs):
+        if dataset_args is None:
+            dataset_args = [dataset_args] * len(dataset_names)
         if self.col_width is None:
             self.col_width = col_width
         else:
@@ -184,6 +195,16 @@ class IndepUnionDataset(data.dataset):
                               f" Remember to adapt the column width when loading the file later.")
         if out_fname is None:
             out_fname = self.data_savename
+
+        n_batch_offset = 0
+        try:
+            shared_batches = kwargs.pop("shared_batches")
+        except KeyError:
+            shared_batches = False
+        try:
+            shared_labels = kwargs.pop("shared_labels")
+        except KeyError:
+            shared_labels = False
 
         used_datasets = dict()
         for dataset_fname, dataset_class, dataset_arg in zip(dataset_names, dataset_classes, dataset_args):
@@ -195,14 +216,14 @@ class IndepUnionDataset(data.dataset):
 
             if dataset_fname is None:
                 if dataset_arg is not None:
-                    dataset = dataset_class(dataset_arg, save_path=save_path)
+                    dataset = dataset_class(dataset_arg, save_path=self.save_path)
                 else:
-                    dataset = dataset_class(save_path=save_path)
+                    dataset = dataset_class(save_path=self.save_path)
             else:
                 if dataset_arg is not None:
-                    dataset = dataset_class(dataset_fname, dataset_arg, save_path=save_path)
+                    dataset = dataset_class(dataset_fname, dataset_arg, save_path=self.save_path)
                 else:
-                    dataset = dataset_class(dataset_fname, save_path=save_path)
+                    dataset = dataset_class(dataset_fname, save_path=self.save_path)
 
             if not hasattr(dataset, "gene_names"):
                 continue
@@ -214,7 +235,7 @@ class IndepUnionDataset(data.dataset):
             # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we use
             if not dataset.dense:
                 dataset.X = dataset.X.toarray()
-            data = self.map_to_genes(dataset.X)
+            data = self.map_data(dataset.X)
             gene_names = dataset.gene_names.flatten()
             local_means = dataset.local_means.flatten()
             local_vars = dataset.local_vars.flatten()
@@ -234,20 +255,133 @@ class IndepUnionDataset(data.dataset):
             # out_fname_batchindices.fwf
             # out_fname_labels.fwf
 
-            with open(self.save_path + '/' + out_fname + '_data.fwf', 'a') as d,\
-                 open(self.save_path + '/' + out_fname + '_genemeans.fwf', 'a') as gn,\
-                 open(self.save_path + '/' + out_fname + '_localmeans.fwf', 'a') as lm,\
-                 open(self.save_path + '/' + out_fname + '_localvars.fwf', 'a') as lv,\
-                 open(self.save_path + '/' + out_fname + '_batchindices.fwf', 'a') as bi,\
-                 open(self.save_path + '/' + out_fname + '_labels.fwf', 'a') as l:
+            with open(self.save_path + '/' + out_fname + '_data.fwf', 'ab') as d,\
+                 open(self.save_path + '/' + out_fname + '_genemeans.fwf', 'ab') as gn,\
+                 open(self.save_path + '/' + out_fname + '_localmeans.fwf', 'ab') as lm,\
+                 open(self.save_path + '/' + out_fname + '_localvars.fwf', 'ab') as lv,\
+                 open(self.save_path + '/' + out_fname + '_batchindices.fwf', 'ab') as bi,\
+                 open(self.save_path + '/' + out_fname + '_labels.fwf', 'ab') as l:
 
                 for row in data:
                     d.write("".join([f"{entry: <{col_width}}" for entry in row]) + '\n')
                 gn.write("".join([f"{entry: <{col_width}}" for entry in gene_names]) + '\n')
                 lm.write("".join([f"{entry: <{col_width}}" for entry in local_means]) + '\n')
                 lv.write("".join([f"{entry: <{col_width}}" for entry in local_vars]) + '\n')
+
+                batch_indices = batch_indices + n_batch_offset
+                n_batch_offset += dataset.n_batches if not shared_batches else 0
                 bi.write("".join([f"{entry: <{col_width}}" for entry in batch_indices]) + '\n')
+
+                if shared_labels:
+                    if all([hasattr(gene_dataset, "cell_types") for gene_dataset in gene_datasets]):
+                        cell_types = list(
+                            set([cell_type for gene_dataset in gene_datasets for cell_type in gene_dataset.cell_types])
+                        )
+                        labels = []
+                        for gene_dataset in gene_datasets:
+                            mapping = [cell_types.index(cell_type) for cell_type in gene_dataset.cell_types]
+                            labels += [arrange_categories(gene_dataset.labels, mapping_to=mapping)[0]]
+                        labels = np.concatenate(labels)
+                    else:
+                        labels = np.concatenate([gene_dataset.labels for gene_dataset in gene_datasets])
+                else:
+                    labels = np.zeros((new_shape[0], 1))
+                    n_labels_offset = 0
+                    current_index = 0
+                    for gene_dataset in gene_datasets:
+                        next_index = current_index + len(gene_dataset)
+                        labels[current_index:next_index] = gene_dataset.labels + n_labels_offset
+                        n_labels_offset += gene_dataset.n_labels
+                        current_index = next_index
+
                 l.write("".join([f"{entry: <{col_width}}" for entry in labels]) + '\n')
 
         print(f"Conversion completed to file '{out_fname}_.fwf'")
 
+    @staticmethod
+    def _available_genes(dataset, on_ref, on="gene_names"):
+        indices = []
+        for gn in getattr(dataset, on):
+            indices.append(on_ref.index(gn))
+        return np.array(indices)
+
+    @staticmethod
+    def concat_datasets_union(*gene_datasets, on='gene_names', shared_labels=True, shared_batches=False):
+        """
+        Combines multiple unlabelled gene_datasets based on the union of gene names intersection.
+        Datasets should all have gene_dataset.n_labels=0.
+        Batch indices are generated in the same order as datasets are given.
+        :param gene_datasets: a sequence of gene_datasets object
+        :return: a GeneExpressionDataset instance of the concatenated datasets
+        """
+        assert all([hasattr(gene_dataset, on) for gene_dataset in gene_datasets])
+
+        gene_names_ref = set()
+        gene_names = []
+        # add all gene names in the order they appear in the datasets
+        for gene_dataset in gene_datasets:
+            for name in list(set(getattr(gene_dataset, on))):
+                if name not in gene_names_ref:
+                    gene_names.append(name)
+                gene_names_ref.add(name)
+
+        print("All genes used %d" % len(gene_names))
+
+        new_shape = (sum(len(dataset) for dataset in gene_datasets), len(gene_names))
+        if sum((data.dense for data in gene_datasets)) > 0.5:
+            # most datasets provided are dense
+            X = np.zeros(new_shape, dtype=float)
+        else:
+            X = sp_sparse.csr_matrix(new_shape, dtype=float)
+        start_row = 0
+        # build a new dataset out of all datasets
+        for dataset in gene_datasets:
+            ds_len = len(dataset)
+            subset_genes = IndepUnionDataset._available_genes(dataset, gene_names, on=on)
+            X[start_row:start_row + ds_len, subset_genes] = dataset.X
+            start_row += ds_len
+
+        if not any([gene_dataset.dense for gene_dataset in gene_datasets]):
+            X = sp_sparse.csr_matrix(X)
+
+        batch_indices = np.zeros((new_shape[0], 1))
+        n_batch_offset = 0
+        current_index = 0
+        for gene_dataset in gene_datasets:
+            next_index = current_index + len(gene_dataset)
+            batch_indices[current_index:next_index] = gene_dataset.batch_indices + n_batch_offset
+            n_batch_offset += (gene_dataset.n_batches if not shared_batches else 0)
+            current_index = next_index
+
+        cell_types = None
+        if shared_labels:
+            if all([hasattr(gene_dataset, "cell_types") for gene_dataset in gene_datasets]):
+                cell_types = list(
+                    set([cell_type for gene_dataset in gene_datasets for cell_type in gene_dataset.cell_types])
+                )
+                labels = []
+                for gene_dataset in gene_datasets:
+                    mapping = [cell_types.index(cell_type) for cell_type in gene_dataset.cell_types]
+                    labels += [arrange_categories(gene_dataset.labels, mapping_to=mapping)[0]]
+                labels = np.concatenate(labels)
+            else:
+                labels = np.concatenate([gene_dataset.labels for gene_dataset in gene_datasets])
+        else:
+            labels = np.zeros((new_shape[0], 1))
+            n_labels_offset = 0
+            current_index = 0
+            for gene_dataset in gene_datasets:
+                next_index = current_index + len(gene_dataset)
+                labels[current_index:next_index] = gene_dataset.labels + n_labels_offset
+                n_labels_offset += gene_dataset.n_labels
+                current_index = next_index
+
+        local_means = np.concatenate([gene_dataset.local_means for gene_dataset in gene_datasets])
+        local_vars = np.concatenate([gene_dataset.local_vars for gene_dataset in gene_datasets])
+        result = GeneExpressionDataset(X, local_means, local_vars, batch_indices, labels,
+                                       gene_names=gene_names, cell_types=cell_types)
+        result.barcodes = [gene_dataset.barcodes if hasattr(gene_dataset, 'barcodes') else None
+                           for gene_dataset in gene_datasets]
+        return result
+
+    type_handler_dispatch = staticmethod(type_handler_dispatch)

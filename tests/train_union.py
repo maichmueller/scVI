@@ -6,19 +6,10 @@
 
 import numpy as np
 
-from scvi.benchmark import all_benchmarks, benchmark, benchmark_fish_scrna, ldvae_benchmark
-from scvi.dataset import BrainLargeDataset, CortexDataset, RetinaDataset, BrainSmallDataset, HematoDataset, \
-    LoomDataset, AnnDataset, CsvDataset, CiteSeqDataset, CbmcDataset, PbmcDataset, SyntheticDataset, \
-    SeqfishDataset, SmfishDataset, BreastCancerDataset, MouseOBDataset, \
-    GeneExpressionDataset, PurifiedPBMCDataset, SyntheticDatasetCorr, ZISyntheticDatasetCorr, \
-    Dataset10X
-from scvi.inference import JointSemiSupervisedTrainer, AlternateSemiSupervisedTrainer, ClassifierTrainer, \
-    UnsupervisedTrainer, AdapterTrainer
-from scvi.inference.annotation import compute_accuracy_rf, compute_accuracy_svc
+from scvi.dataset import union, GeneExpressionDataset, Dataset10X, IndepUnionDataset
+from scvi.inference import UnsupervisedTrainer
 from scvi.models import VAE, SCANVI, VAEC
-from scvi.models.classifier import Classifier
-import anndata
-import os.path
+
 import torch
 
 
@@ -56,5 +47,6 @@ def train_vae(dataset, save_path, use_cuda=torch.cuda.is_available(), n_epochs=1
 
 
 if __name__ == '__main__':
-    data = concat_datasets_10x("./data/")
-    train_vae(data, "./data/")
+    # data = concat_datasets_10x("./data/")
+    data = IndepUnionDataset('./data', load_map_fname="all_data", data_fname="complete_data_union")
+    train_vae(data, "./data")
