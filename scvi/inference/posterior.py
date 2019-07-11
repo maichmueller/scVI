@@ -2,12 +2,13 @@ import copy
 import os
 import logging
 
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 import numpy as np
 import pandas as pd
 import scipy
 import torch
+import torch.distributions as distributions
 
 from matplotlib import pyplot as plt
 from scipy.stats import kde, entropy
@@ -22,6 +23,7 @@ from sklearn.utils.linear_assignment_ import linear_assignment
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SequentialSampler, SubsetRandomSampler, RandomSampler
 
+from scvi.dataset import GeneExpressionDataset
 from scvi.models.log_likelihood import compute_elbo, compute_reconstruction_error, compute_marginal_log_likelihood
 
 logger = logging.getLogger(__name__)
@@ -69,7 +71,15 @@ class Posterior:
 
     """
 
-    def __init__(self, model, gene_dataset, shuffle=False, indices=None, use_cuda=True, data_loader_kwargs=dict()):
+    def __init__(
+        self,
+        model,
+        gene_dataset: GeneExpressionDataset,
+        shuffle=False,
+        indices=None,
+        use_cuda=True,
+        data_loader_kwargs=dict(),
+    ):
         """
 
         When added to annotation, has a private name attribute
@@ -91,9 +101,9 @@ class Posterior:
                 indices = np.where(indices)[0].ravel()
             sampler = SubsetRandomSampler(indices)
         self.data_loader_kwargs = copy.copy(data_loader_kwargs)
-        if hasattr(gene_dataset, "collate_fn"):
-            self.data_loader_kwargs.update({"collate_fn": gene_dataset.collate_fn})
-        self.data_loader_kwargs.update({"sampler": sampler})
+        self.data_loader_kwargs.update(
+            {"collate_fn": gene_dataset.collate_fn_builder(), "sampler": sampler}
+        )
         self.data_loader = DataLoader(gene_dataset, **self.data_loader_kwargs)
 
     def accuracy(self):
@@ -125,10 +135,12 @@ class Posterior:
         return self.update({"batch_size": batch_size, "sampler": SequentialSubsetSampler(indices=self.indices)})
 
     def corrupted(self):
-        return self.update({"collate_fn": self.gene_dataset.collate_fn_corrupted})
+        return self.update(
+            {"collate_fn": self.gene_dataset.collate_fn_builder(corrupted=True)}
+        )
 
     def uncorrupted(self):
-        return self.update({"collate_fn": self.gene_dataset.collate_fn})
+        return self.update({"collate_fn": self.gene_dataset.collate_fn_builder()})
 
     @torch.no_grad()
     def elbo(self):
@@ -198,9 +210,14 @@ class Posterior:
         for tensors in self.update({"batch_size": batch_size}):
             sample_batch, _, _, batch_index, labels = tensors
             px_scales += [
-                np.array((self.model.get_sample_scale(
-                    sample_batch, batch_index=batch_index, y=labels, n_samples=M_sampling)
-                         ).cpu())]
+                np.array(
+                    (
+                        self.model.get_sample_scale(
+                            sample_batch, batch_index=batch_index, y=labels, n_samples=M_sampling
+                        )
+                    ).cpu()
+                )
+            ]
 
             # Align the sampling
             if M_sampling > 1:
@@ -244,8 +261,7 @@ class Posterior:
         M_permutation: int = None,
         all_stats: bool = True,
     ):
-        """
-        Computes gene specific Bayes factors using masks idx1 and idx2
+        """Computes gene specific Bayes factors using masks idx1 and idx2
 
         To that purpose we sample the Posterior in the following way:
             1. The posterior is sampled n_samples times for each subpopulation
@@ -296,7 +312,7 @@ class Posterior:
         px_scale = np.concatenate((px_scale1, px_scale2), axis=0)
         all_labels = np.concatenate((np.repeat(0, len(px_scale1)), np.repeat(1, len(px_scale2))), axis=0)
         if genes is not None:
-            px_scale = px_scale[:, self.gene_dataset._gene_idx(genes)]
+            px_scale = px_scale[:, self.gene_dataset.genes_to_index(genes)]
         bayes1 = get_bayes_factors(px_scale, all_labels, cell_idx=0, M_permutation=M_permutation,
                                    permutation=False, sample_pairs=sample_pairs)
         if all_stats is True:
@@ -503,39 +519,61 @@ class Posterior:
         return imputed_list.squeeze()
 
     @torch.no_grad()
-    def generate(self, n_samples=100, genes=None):  # with n_samples>1 return original list/ otherwose sequential
+    def generate(
+        self,
+        n_samples: int = 100,
+        genes: Union[list, np.ndarray] = None,
+        batch_size: int = 128
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Return original_values as y and generated as x (for posterior density visualization)
-        :param n_samples:
-        :param genes:
-        :return:
+        Create observation samples from the Posterior Predictive distribution
+
+        :param n_samples: Number of required samples for each cell
+        :param genes: Indices of genes of interest
+        :param batch_size: Desired Batch size to generate data
+
+        :return: Tuple (x_new, x_old)
+            Where x_old has shape (n_cells, n_genes)
+            Where x_new has shape (n_cells, n_genes, n_samples)
         """
-        original_list = []
-        posterior_list = []
-        batch_size = 128  # max(self.data_loader_kwargs["batch_size"] // n_samples, 2)  # Reduce batch_size on GPU
+        assert self.model.reconstruction_loss in ['zinb', 'nb']
+        zero_inflated = self.model.reconstruction_loss == 'zinb'
+        x_old = []
+        x_new = []
         for tensors in self.update({"batch_size": batch_size}):
             sample_batch, _, _, batch_index, labels = tensors
-            px_dispersion, px_rate = self.model.inference(sample_batch, batch_index=batch_index, y=labels,
-                                                          n_samples=n_samples)[1:3]
-            # This gamma is really l*w using scVI manuscript notation
-            p = (px_rate / (px_rate + px_dispersion)).cpu()
-            r = px_dispersion.cpu()
-            l_train = np.random.gamma(r, p / (1 - p))
-            X = np.random.poisson(l_train)
-            # """
-            # In numpy (shape, scale) => (concentration, rate), with scale = p /(1 - p)
-            # rate = (1 - p) / p  # = 1/scale # used in pytorch
-            # """
-            original_list += [np.array(sample_batch.cpu())]
-            posterior_list += [X]
+            px_dispersion, px_rate, px_dropout = self.model.inference(
+                sample_batch,
+                batch_index=batch_index,
+                y=labels,
+                n_samples=n_samples
+            )[1:4]
 
-            if genes is not None:
-                posterior_list[-1] = posterior_list[-1][:, :, self.gene_dataset._gene_idx(genes)]
-                original_list[-1] = original_list[-1][:, self.gene_dataset._gene_idx(genes)]
+            p = px_rate / (px_rate + px_dispersion)
+            r = px_dispersion
+            # Important remark: Gamma is parametrized by the rate = 1/scale!
+            l_train = distributions.Gamma(concentration=r, rate=(1 - p) / p).sample()
+            # Clamping as distributions objects can have buggy behaviors when
+            # their parameters are too high
+            l_train = torch.clamp(l_train, max=1e8)
+            gene_expressions = distributions.Poisson(l_train).sample()  # Shape : (n_samples, n_cells_batch, n_genes)
+            if zero_inflated:
+                p_zero = (1.0 + torch.exp(-px_dropout)).pow(-1)
+                random_prob = torch.rand_like(p_zero)
+                gene_expressions[random_prob <= p_zero] = 0
 
-            posterior_list[-1] = np.transpose(posterior_list[-1], (1, 2, 0))
+            gene_expressions = gene_expressions.permute([1, 2, 0])  # Shape : (n_cells_batch, n_genes, n_samples)
 
-        return np.concatenate(posterior_list, axis=0), np.concatenate(original_list, axis=0)
+            x_old.append(sample_batch)
+            x_new.append(gene_expressions)
+
+        x_old = torch.cat(x_old)  # Shape (n_cells, n_genes)
+        x_new = torch.cat(x_new)  # Shape (n_cells, n_genes, n_samples)
+        if genes is not None:
+            gene_ids = self.gene_dataset.genes_to_index(genes)
+            x_new = x_new[:, gene_ids, :]
+            x_old = x_old[:, gene_ids]
+        return x_new.cpu().numpy(), x_old.cpu().numpy()
 
     @torch.no_grad()
     def generate_parameters(self):
@@ -579,9 +617,14 @@ class Posterior:
         for tensors in self:
             sample_batch, _, _, batch_index, labels = tensors
             px_scales += [
-                np.array((self.model.get_sample_scale(
-                    sample_batch, batch_index=batch_index, y=labels, n_samples=1)
-                         ).cpu())]
+                np.array(
+                    (
+                        self.model.get_sample_scale(
+                            sample_batch, batch_index=batch_index, y=labels, n_samples=1
+                        )
+                    ).cpu()
+                )
+            ]
         return np.concatenate(px_scales)
 
     @torch.no_grad()
@@ -682,9 +725,9 @@ class Posterior:
         protein level. Compute the overlap fold enrichment between the protein and mRNA-based cell 100-nearest neighbor
         graph and the Spearman correlation of the adjacency matrices.
         """
-        if hasattr(self.gene_dataset, "adt_expression_clr"):
+        if hasattr(self.gene_dataset, "protein_expression_clr"):
             latent, _, _ = self.sequential().get_latent()
-            protein_data = self.gene_dataset.adt_expression_clr[self.indices]
+            protein_data = self.gene_dataset.protein_expression_clr[self.indices]
             spearman_correlation, fold_enrichment = nn_overlap(latent, protein_data, **kwargs)
             logger.debug("Overlap Scores:\nSpearman Correlation: %.4f\nFold Enrichment: %.4f" %
                          (spearman_correlation, fold_enrichment))
@@ -711,7 +754,7 @@ class Posterior:
             if color_by == "batches" or color_by == "labels":
                 indices = batch_indices.ravel() if color_by == "batches" else labels.ravel()
                 n = n_batch if color_by == "batches" else self.gene_dataset.n_labels
-                if hasattr(self.gene_dataset, "cell_types") and color_by == "labels":
+                if self.gene_dataset.cell_types is not None and color_by == "labels":
                     plt_labels = self.gene_dataset.cell_types
                 else:
                     plt_labels = [str(i) for i in range(len(np.unique(indices)))]
