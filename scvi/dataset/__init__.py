@@ -16,7 +16,7 @@ from scvi.dataset.synthetic import (
     SyntheticDatasetCorr,
     ZISyntheticDatasetCorr,
 )
-from scvi.dataset.union import IndepUnionDataset
+from scvi.dataset.union import UnionDataset
 
 
 __all__ = [

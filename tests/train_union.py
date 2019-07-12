@@ -6,7 +6,7 @@
 
 import numpy as np
 
-from scvi.dataset import union, GeneExpressionDataset, Dataset10X, IndepUnionDataset
+from scvi.dataset import union, GeneExpressionDataset, Dataset10X, UnionDataset
 from scvi.inference import UnsupervisedTrainer
 from scvi.models import VAE, SCANVI, VAEC
 
@@ -23,7 +23,7 @@ def concat_datasets_10x(save_path):
         if not data.dense and idx < 5:
             datasets_10x.append(data)
 
-    datasets_10x_merged = GeneExpressionDataset.concat_datasets_union(*datasets_10x)
+    datasets_10x_merged = UnionDataset.concat_datasets_union(*datasets_10x)
     return datasets_10x_merged
 
 
@@ -48,5 +48,5 @@ def train_vae(dataset, save_path, use_cuda=torch.cuda.is_available(), n_epochs=1
 
 if __name__ == '__main__':
     # data = concat_datasets_10x("./data/")
-    data = IndepUnionDataset('./data', load_map_fname="all_data", data_fname="complete_data_union")
+    data = UnionDataset('./data', map_fname="all_data", data_fname="complete_data_union")
     train_vae(data, "./data")

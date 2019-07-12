@@ -62,12 +62,12 @@ class HematoDataset(DownloadableDataset):
             raw_counts.index[raw_counts["library_id"] == "basal_bm1"], inplace=True
         )
 
-        spring_and_pba = pd.read_csv(os.path.join(self.save_path + '/data/HEMATO/', self.spring_and_pba_filename))
-        # with open(self.save_path + self.gene_names_filename) as f:
-        #     gene_filter_list = f.read()
-        #
-        # gene_names = gene_filter_list.splitlines()
-        gene_names = np.loadtxt(os.path.join(self.save_path + '/data/HEMATO/', self.gene_names_filename), dtype=np.str)
+        spring_and_pba = pd.read_csv(
+            os.path.join(self.save_path, "HEMATO", self.spring_and_pba_filename)
+        )
+        gene_names = np.loadtxt(
+            os.path.join(self.save_path, "HEMATO", self.gene_names_filename), dtype=np.str
+        )
 
         data = raw_counts.merge(spring_and_pba, how="inner")
         expression_data = data[gene_names]
