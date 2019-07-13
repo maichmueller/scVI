@@ -15,15 +15,11 @@ import functools
 import sys
 from tqdm import tqdm
 
-default_col_width = 8
-
 
 class UnionDataset(GeneExpressionDataset):
-
-
     def __init__(self, save_path, low_memory=True,
                  map_fname=None, map_save_fname=None,
-                 data_fname=None, data_save_fname=None, col_width=None):
+                 data_fname=None, data_save_fname=None):
         super().__init__()
         self.gene_map = None
         self.gene_names = []
@@ -47,15 +43,12 @@ class UnionDataset(GeneExpressionDataset):
 
         if data_fname is not None:
             if not low_memory:
-                if col_width is None:
-                    warnings.warn("Column width unspecified. Setting it to default=16")
-                    col_width = default_col_width
-                X = np.array(self._read_fixed_width_file(self.data_fname + '_data.fwf', col_width))
-                gn = np.array(self._read_fixed_width_file(self.data_fname + '_genenames.fwf', col_width))
-                lm = np.array(self._read_fixed_width_file(self.data_fname + '_localmeans.fwf', col_width))
-                lv = np.array(self._read_fixed_width_file(self.data_fname + '_localvars.fwf', col_width))
-                bi = np.array(self._read_fixed_width_file(self.data_fname + '_batchindices.fwf', col_width))
-                l = np.array(self._read_fixed_width_file(self.data_fname + '_labels.fwf', col_width))
+                X = np.array(self._read_nonuniform_csv(self.data_fname + '_data.nucsv'))
+                gn = np.array(self._read_nonuniform_csv(self.data_fname + '_genenames.nucsv'))
+                lm = np.array(self._read_nonuniform_csv(self.data_fname + '_localmeans.nucsv'))
+                lv = np.array(self._read_nonuniform_csv(self.data_fname + '_localvars.nucsv'))
+                bi = np.array(self._read_nonuniform_csv(self.data_fname + '_batchindices.nucsv'))
+                l = np.array(self._read_nonuniform_csv(self.data_fname + '_labels.nucsv'))
                 self.populate_from_data(X, gene_names=gn, batch_indices=bi, labels=l)
                 self.local_means = lm
                 self.local_vars = lv
@@ -65,24 +58,69 @@ class UnionDataset(GeneExpressionDataset):
         self.data_fname = data_fname
         self.data_save_fname = data_save_fname
         self.low_memory = low_memory
-        self.col_width = col_width
         self.datasets_used = None
 
+    def __len__(self):
+        return len(self.gene_map)
+
+    def __getitem__(self, idx):
+        return idx
+
+    def collate_fn(self, indices):
+        indices = sorted(indices)
+
+        data_sample = []
+        gene_sample = []
+        local_means_sample = []
+        local_vars_sample = []
+        batch_indices_sample = []
+        labels_sample = []
+
+        with open(self.data_fname + '_data.nucsv', 'rb') as d, \
+            open(self.data_fname + '_genenames.nucsv', 'rb') as gn, \
+            open(self.data_fname + '_localmeans.nucsv', 'rb') as lm, \
+            open(self.data_fname + '_localvars.nucsv', 'rb') as lv, \
+            open(self.data_fname + '_batchindices.nucsv', 'rb') as bi, \
+            open(self.data_fname + '_labels.fwf', 'nucsv') as l:
+
+            for i in indices:
+                d.seek(i)
+                gn.seek(i)
+                lm.seek(i)
+                lv.seek(i)
+                bi.seek(i)
+                l.seek(i)
+
+                # Append the line to the sample sets
+                data_sample.append(d.readline().strip())
+                gene_sample.append(gn.readline().strip())
+                local_means_sample.append(lm.readline().strip())
+                local_vars_sample.append(lv.readline().strip())
+                batch_indices_sample.append(bi.readline().strip())
+                labels_sample.append(l.readline().strip())
+
+        return (torch.FloatTensor(data_sample),
+                torch.FloatTensor(local_means_sample),
+                torch.FloatTensor(local_vars_sample),
+                torch.LongTensor(batch_indices_sample),
+                torch.LongTensor(labels_sample))
+
     @staticmethod
-    def _read_fixed_width_file(fname, width):
+    def _read_nonuniform_csv(fname):
         data = []
         with open(fname, 'rb') as file:
             for line in file:
-                line_len = len(line)
-                if line_len % width != 0:
-                    raise ValueError(f"Fixed width separation of {width} doesn't align with file layout "
-                                     f"(specific line length of error was {line_len}")
-
-                for el in range(0, line_len // width):
-                    data.append(line[el*width:(el+1)*width])
+                data.extend(line.decode().split(","))
         return data
 
-    def build_mapping(self, dataset_names, dataset_classes, dataset_args=None, multiprocess=True, **kwargs):
+    def build_mapping(
+        self,
+        dataset_names,
+        dataset_classes,
+        dataset_args=None,
+        multiprocess=True,
+        **kwargs
+    ):
         if self.gene_map is not None:
             return
 
@@ -109,27 +147,48 @@ class UnionDataset(GeneExpressionDataset):
                 os.path.join(self.save_path, self.map_save_fname + "_used_datasets.csv")
             )
 
-    def _build_mapping_serial(self, dataset_names, dataset_classes, filtered_classes, dataset_args=None, **kwargs):
+    def _load_dataset(
+        self,
+        ds_name,
+        ds_class,
+        ds_args,
+        check_for_genenames=True
+    ):
+        print(f"{ds_class, ds_name}...")
+        if ds_name is not None:
+            if ds_args is not None:
+                dataset = ds_class(ds_name, save_path=self.save_path, **ds_args)
+            else:
+                dataset = ds_class(ds_name, save_path=self.save_path)
+        else:
+            if ds_args is not None:
+                dataset = ds_class(save_path=self.save_path, **ds_args)
+            else:
+                dataset = ds_class(save_path=self.save_path)
+
+        if check_for_genenames and dataset.gene_names is None:
+            # without gene names we can't build a proper mapping
+            warnings.warn(
+                f"Dataset {(ds_class, ds_name)} doesn't have gene_names as attribute. Skipping this dataset.")
+            return None
+
+        return set(dataset.gene_names), ds_class, ds_name
+
+    def _build_mapping_serial(
+        self,
+        dataset_names,
+        dataset_classes,
+        filtered_classes,
+        dataset_args=None,
+        **kwargs
+    ):
         gene_map = dict()
         gene_names_len = 0
         for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args):
-            if ds_name is not None:
-                if ds_args is not None:
-                    dataset = ds_class(ds_name, save_path=self.save_path, **ds_args)
-                else:
-                    dataset = ds_class(ds_name, save_path=self.save_path)
-            else:
-                if ds_args is not None:
-                    dataset = ds_class(save_path=self.save_path, **ds_args)
-                else:
-                    dataset = ds_class(save_path=self.save_path)
-
-            if dataset.gene_names is None:
-                # without gene names we can't build a proper mapping
-                warnings.warn(f"Dataset {(ds_class, ds_name)} doesn't have gene_names as attribute. "
-                              f"Skipping this dataset.")
+            res = self._load_dataset(ds_name, ds_class, ds_args)
+            if res is None:
                 continue
-
+            dataset = res[0]
             filtered_classes[str(ds_class)].append(str(ds_name))
 
             print("Extending gene list...", end="")
@@ -144,32 +203,18 @@ class UnionDataset(GeneExpressionDataset):
 
         return gene_map
 
-    def _process_dataset(self, ds_name, ds_class, ds_args):
-        print(f"{ds_class, ds_name}...")
-        if ds_name is not None:
-            if ds_args is not None:
-                dataset = ds_class(ds_name, save_path=self.save_path, **ds_args)
-            else:
-                dataset = ds_class(ds_name, save_path=self.save_path)
-        else:
-            if ds_args is not None:
-                dataset = ds_class(save_path=self.save_path, **ds_args)
-            else:
-                dataset = ds_class(save_path=self.save_path)
-
-        if dataset.gene_names is None:
-            # without gene names we can't build a proper mapping
-            warnings.warn(
-                f"Dataset {(ds_class, ds_name)} doesn't have gene_names as attribute. Skipping this dataset.")
-            return
-
-        return set(dataset.gene_names), ds_class, ds_name
-
-    def _build_mapping_mp(self, dataset_names, dataset_classes, filtered_classes, dataset_args=None, **kwargs):
+    def _build_mapping_mp(
+        self,
+        dataset_names,
+        dataset_classes,
+        filtered_classes,
+        dataset_args=None,
+        **kwargs
+    ):
         total_genes = set()
         with ProcessPoolExecutor(max_workers=min(len(dataset_names), cpu_count() // 2)) as executor:
             futures = list(
-                (executor.submit(self._process_dataset,
+                (executor.submit(self._load_dataset,
                                  ds_name,
                                  ds_class,
                                  ds_args)
@@ -177,7 +222,7 @@ class UnionDataset(GeneExpressionDataset):
             )
             for future in as_completed(futures):
                 res = future.result()
-                if res:
+                if res is not None:
                     total_genes = total_genes.union(res[0])
                     filtered_classes[res[1]].append(res[2])
 
@@ -185,7 +230,12 @@ class UnionDataset(GeneExpressionDataset):
         return gene_map
 
     def _type_handler_dispatch(func):
-        def wrapped(self, dataset, *args, **kwargs):
+        def wrapped(
+            self,
+            dataset,
+            *args,
+            **kwargs
+        ):
             ds_type = type(dataset)
             if ds_type == GeneExpressionDataset:
                 if dataset.gene_names is not None:
@@ -228,7 +278,13 @@ class UnionDataset(GeneExpressionDataset):
         return wrapped
 
     @_type_handler_dispatch
-    def map_data(self, data, gene_names, *args, **kwargs):
+    def map_data(
+        self,
+        data,
+        gene_names,
+        *args,
+        **kwargs
+    ):
 
         data_out = np.zeros((len(data), self.gene_names_len), dtype=float)
         try:
@@ -239,53 +295,14 @@ class UnionDataset(GeneExpressionDataset):
 
         return data_out
 
-    def __len__(self):
-        return len(self.gene_map)
-
-    def __getitem__(self, idx):
-        return idx
-
-    def collate_fn(self, indices):
-        indices = sorted(indices)
-
-        data_sample = []
-        gene_sample = []
-        local_means_sample = []
-        local_vars_sample = []
-        batch_indices_sample = []
-        labels_sample = []
-
-        with open(self.data_fname + '_data.fwf', 'rb') as d, \
-            open(self.data_fname + '_genenames.fwf', 'rb') as gn, \
-            open(self.data_fname + '_localmeans.fwf', 'rb') as lm, \
-            open(self.data_fname + '_localvars.fwf', 'rb') as lv, \
-            open(self.data_fname + '_batchindices.fwf', 'rb') as bi, \
-            open(self.data_fname + '_labels.fwf', 'rb') as l:
-
-            for i in indices:
-                d.seek(i)
-                gn.seek(i)
-                lm.seek(i)
-                lv.seek(i)
-                bi.seek(i)
-                l.seek(i)
-
-                # Append the line to the sample sets
-                data_sample.append(d.readline().strip())
-                gene_sample.append(gn.readline().strip())
-                local_means_sample.append(lm.readline().strip())
-                local_vars_sample.append(lv.readline().strip())
-                batch_indices_sample.append(bi.readline().strip())
-                labels_sample.append(l.readline().strip())
-
-        return (torch.FloatTensor(data_sample),
-                torch.FloatTensor(local_means_sample),
-                torch.FloatTensor(local_vars_sample),
-                torch.LongTensor(batch_indices_sample),
-                torch.LongTensor(labels_sample))
-
-    def concat_to_fwf(self, dataset_names, dataset_classes, dataset_args=None, out_fname=None, col_width=default_col_width,
-                      **kwargs):
+    def concat_to_nucsv(
+        self,
+        dataset_names,
+        dataset_classes,
+        dataset_args=None,
+        out_fname=None,
+        **kwargs
+    ):
         if self.X is not None:
             print(f'Data already built/loaded (potentially from file {self.map_fname}).')
             return
@@ -294,13 +311,7 @@ class UnionDataset(GeneExpressionDataset):
             return
         if dataset_args is None:
             dataset_args = [dataset_args] * len(dataset_names)
-        if self.col_width is None:
-            self.col_width = col_width
-        else:
-            if self.col_width != col_width:
-                warnings.warn(f"Column width was already specified in the data handler object (width={self.col_width}),"
-                              f" but was also passed as overwriting parameter of differing value (width={col_width})."
-                              f" Remember to adapt the column width when loading the file later.")
+
         if out_fname is None:
             out_fname = self.data_save_fname
 
@@ -310,6 +321,19 @@ class UnionDataset(GeneExpressionDataset):
             shared_batches = kwargs.pop("shared_batches")
         except KeyError:
             shared_batches = False
+
+        def getrow(data, idx_start, idx_end):
+            if isinstance(data, np.ndarray):
+                return data[idx_start:idx_end, :].reshape(idx_end-idx_start, -1)
+            else:
+                # assuming scipy sparse instead
+                return np.concatenate(
+                    [data.getrow(i).toarray() for i in range(idx_start, min(idx_end, data.shape[0]))],
+                    axis=0
+                )
+
+        offset = 0
+        line_count = 0
 
         used_datasets = dict()
         for dataset_fname, dataset_class, dataset_arg in zip(dataset_names, dataset_classes, dataset_args):
@@ -338,10 +362,8 @@ class UnionDataset(GeneExpressionDataset):
             # grab the necessary data parts:
             # aside from the data itself (X), the gene_names, local means, local_vars, batch_indices and labels
             # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we use
-            if not dataset.dense:
-                dataset.X = dataset.X.toarray()
-            gene_names = dataset.gene_names.flatten()
             data = dataset.X
+            gene_names = dataset.gene_names.flatten()
             local_means = dataset.local_means.flatten()
             local_vars = dataset.local_vars.flatten()
             batch_indices = dataset.batch_indices.flatten()
@@ -354,25 +376,33 @@ class UnionDataset(GeneExpressionDataset):
             # Build the group files for the dataset, under which the data is going to be stored
             # We will store the above mentioned data in the following scheme:
             # out_fname_data.fwf
+            # out_fname_metadata.fwf
             # out_fname_genenames.fwf
             # out_fname_localmeans.fwf
             # out_fname_localvars.fwf
             # out_fname_batchindices.fwf
             # out_fname_labels.fwf
 
-            with open(self.save_path + '/' + out_fname + '_data.fwf', 'ab') as d, \
-                open(self.save_path + '/' + out_fname + '_genemeans.fwf', 'ab') as gn, \
-                open(self.save_path + '/' + out_fname + '_localmeans.fwf', 'ab') as lm, \
-                open(self.save_path + '/' + out_fname + '_localvars.fwf', 'ab') as lv, \
-                open(self.save_path + '/' + out_fname + '_batchindices.fwf', 'ab') as bi, \
-                open(self.save_path + '/' + out_fname + '_labels.fwf', 'ab') as l:
+            with open(self.save_path + '/' + out_fname + '_data.nucsv', 'ab') as d, \
+                open(self.save_path + '/' + out_fname + '_metadata.nucsv', 'a') as d_meta, \
+                open(self.save_path + '/' + out_fname + '_genemeans.nucsv', 'ab') as gn, \
+                open(self.save_path + '/' + out_fname + '_localmeans.nucsv', 'ab') as lm, \
+                open(self.save_path + '/' + out_fname + '_localvars.nucsv', 'ab') as lv, \
+                open(self.save_path + '/' + out_fname + '_batchindices.nucsv', 'ab') as bi, \
+                open(self.save_path + '/' + out_fname + '_labels.nucsv', 'ab') as l:
 
-                col_indices = [self.gene_map[gene] for gene in gene_names]
-                pbar = tqdm(data)
-                pbar.set_description("Writing dataset's raw data to file")
-                for row in pbar:
-                    row = self.map_data(row.reshape(1, -1), gene_names=gene_names, col_indices=col_indices)
-                    d.write(("".join([f"{entry: <{col_width}}" for entry in row[0, :]]) + '\n').encode())
+                nr_rows = 1000
+                pbar = tqdm(range(0, data.shape[0], nr_rows))
+                pbar.set_description(f"Writing raw data of dataset to file (in iterations of {nr_rows} rows)")
+                for row_start in pbar:
+                    rows = getrow(data, row_start, row_start + nr_rows).astype(int)
+                    for row in rows:
+                        line = (",".join([str(entry) for entry in row]) + '\n').encode()
+                        d.write(line)
+                        d_meta.write(f"{line_count}, {offset}")
+                        offset += len(line)
+                        line_count += 1
+
                 gn.write(("".join([f"{entry: <{col_width}}" for entry in gene_names]) + '\n').encode())
                 lm.write(("".join([f"{entry: <{col_width}}" for entry in local_means]) + '\n').encode())
                 lv.write(("".join([f"{entry: <{col_width}}" for entry in local_vars]) + '\n').encode())
@@ -426,7 +456,10 @@ class UnionDataset(GeneExpressionDataset):
         # build a new dataset out of all datasets
         for dataset in gene_datasets:
             ds_len = len(dataset)
-            subset_genes = UnionDataset._available_genes(dataset, gene_names, on=on)
+            indices = []
+            for gn in dataset.gene_names:
+                indices.append(gene_names.index(gn))
+            subset_genes = np.array(indices)
             X[start_row:start_row + ds_len, subset_genes] = dataset.X
             start_row += ds_len
 

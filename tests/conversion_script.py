@@ -14,4 +14,4 @@ if __name__ == '__main__':
     )
     union_dataset = UnionDataset("./data", map_fname="complete_datasets_map", data_save_fname="complete_data_union")
     union_dataset.build_mapping([elem[0] for elem in avail_dsets], [elem[1] for elem in avail_dsets])
-    union_dataset.concat_to_fwf([elem[0] for elem in avail_dsets], [elem[1] for elem in avail_dsets])
+    union_dataset.concat_to_nucsv([elem[0] for elem in avail_dsets], [elem[1] for elem in avail_dsets])
