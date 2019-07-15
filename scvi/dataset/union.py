@@ -5,7 +5,6 @@ import warnings
 from scipy import sparse
 from scvi.dataset import *
 from scvi.dataset.dataset import *
-from scvi.dataset.dataset_hdf import HDF5Dataset, convert_to_hdf5
 import torch
 from torch.utils.data import Dataset
 from collections import defaultdict
@@ -26,6 +25,7 @@ class UnionDataset(GeneExpressionDataset):
         self.gene_names_len = 0
 
         self.save_path = save_path
+        self.line_offsets = None
 
         if map_fname is not None:
             self.gene_map = pd.read_csv(
@@ -53,6 +53,16 @@ class UnionDataset(GeneExpressionDataset):
                 self.local_means = lm
                 self.local_vars = lv
 
+                self.data_filepath = os.path.join(self.save_path, self.data_fname + '_data.nucsv')
+                self.gene_names_filepath = os.path.join(self.save_path, self.data_fname + '_genenames.nucsv')
+                self.local_means_filepath = os.path.join(self.save_path, self.data_fname + '_localmeans.nucsv')
+                self.local_vars_filepath = os.path.join(self.save_path, self.data_fname + '_localvars.nucsv')
+                self.batch_indices_filepath = os.path.join(self.save_path, self.data_fname + '_batchindices.nucsv')
+                self.labels_filepath = os.path.join(self.save_path, self.data_fname + '_labels.nucsv')
+            else:
+                self.line_offsets = pd.read_csv(os.path.join(self.save_path, self.data_fname + "_metadata.csv"),
+                                                header=None, index_col=0)
+
         self.map_fname = map_fname
         self.map_save_fname = map_save_fname
         self.data_fname = data_fname
@@ -76,28 +86,28 @@ class UnionDataset(GeneExpressionDataset):
         batch_indices_sample = []
         labels_sample = []
 
-        with open(self.data_fname + '_data.nucsv', 'rb') as d, \
-            open(self.data_fname + '_genenames.nucsv', 'rb') as gn, \
-            open(self.data_fname + '_localmeans.nucsv', 'rb') as lm, \
-            open(self.data_fname + '_localvars.nucsv', 'rb') as lv, \
-            open(self.data_fname + '_batchindices.nucsv', 'rb') as bi, \
-            open(self.data_fname + '_labels.fwf', 'nucsv') as l:
+        with open(self.data_filepath, 'rb') as d, \
+            open(self.gene_names_filepath, 'rb') as gn, \
+            open(self.local_means_filepath, 'rb') as lm, \
+            open(self.local_vars_filepath, 'rb') as lv, \
+            open(self.batch_indices_filepath, 'rb') as bi, \
+            open(self.labels_filepath, 'rb') as l:
 
-            for i in indices:
-                d.seek(i)
-                gn.seek(i)
-                lm.seek(i)
-                lv.seek(i)
-                bi.seek(i)
-                l.seek(i)
+            for line in [self.line_offsets[i] for i in indices]:
+                d.seek(line)
+                gn.seek(line)
+                lm.seek(line)
+                lv.seek(line)
+                bi.seek(line)
+                l.seek(line)
 
                 # Append the line to the sample sets
-                data_sample.append(d.readline().strip())
-                gene_sample.append(gn.readline().strip())
-                local_means_sample.append(lm.readline().strip())
-                local_vars_sample.append(lv.readline().strip())
-                batch_indices_sample.append(bi.readline().strip())
-                labels_sample.append(l.readline().strip())
+                data_sample.extend(list(map(float, d.readline().decode().strip().split(","))))
+                gene_sample.extend(gn.readline().decode().strip().split(","))
+                local_means_sample.extend(list(map(float, lm.readline().decode().strip().split(","))))
+                local_vars_sample.extend(list(map(float, lv.readline().decode().strip().split(","))))
+                batch_indices_sample.extend(bi.readline().decode().strip().split(","))
+                labels_sample.append(list(map(int, l.readline().decode().strip().split(","))))
 
         return (torch.FloatTensor(data_sample),
                 torch.FloatTensor(local_means_sample),
@@ -324,7 +334,8 @@ class UnionDataset(GeneExpressionDataset):
 
         def getrow(data, idx_start, idx_end):
             if isinstance(data, np.ndarray):
-                return data[idx_start:idx_end, :].reshape(idx_end-idx_start, -1)
+                d_out = data[idx_start:idx_end]
+                return d_out.reshape(min(idx_end-idx_start, d_out.shape[0]), -1)
             else:
                 # assuming scipy sparse instead
                 return np.concatenate(
@@ -384,7 +395,7 @@ class UnionDataset(GeneExpressionDataset):
             # out_fname_labels.fwf
 
             with open(self.save_path + '/' + out_fname + '_data.nucsv', 'ab') as d, \
-                open(self.save_path + '/' + out_fname + '_metadata.nucsv', 'a') as d_meta, \
+                open(self.save_path + '/' + out_fname + '_metadata.csv', 'a') as d_meta, \
                 open(self.save_path + '/' + out_fname + '_genemeans.nucsv', 'ab') as gn, \
                 open(self.save_path + '/' + out_fname + '_localmeans.nucsv', 'ab') as lm, \
                 open(self.save_path + '/' + out_fname + '_localvars.nucsv', 'ab') as lv, \
@@ -403,32 +414,36 @@ class UnionDataset(GeneExpressionDataset):
                         offset += len(line)
                         line_count += 1
 
-                gn.write(("".join([f"{entry: <{col_width}}" for entry in gene_names]) + '\n').encode())
-                lm.write(("".join([f"{entry: <{col_width}}" for entry in local_means]) + '\n').encode())
-                lv.write(("".join([f"{entry: <{col_width}}" for entry in local_vars]) + '\n').encode())
+                gn.write((",".join([f"{entry}" for entry in gene_names]) + '\n').encode())
+                lm.write((",".join([f"{entry}" for entry in local_means]) + '\n').encode())
+                lv.write((",".join([f"{entry}" for entry in local_vars]) + '\n').encode())
 
                 batch_indices += n_batch_offset
                 n_batch_offset += dataset.n_batches if not shared_batches else 0
-                bi.write(("".join([f"{entry: <{col_width}}" for entry in batch_indices]) + '\n').encode())
+                bi.write((",".join([f"{entry}" for entry in batch_indices]) + '\n').encode())
 
                 labels += labels + n_labels_offset
                 n_labels_offset += dataset.n_labels
-                l.write(("".join([f"{entry: <{col_width}}" for entry in labels]) + '\n').encode())
+                l.write((",".join([f"{entry}" for entry in labels]) + '\n').encode())
 
-        print(f"Conversion completed to file '{out_fname}_.fwf'")
+        print(f"Conversion completed to files: \n"
+              f"'{out_fname}_data.nucsv'\n"
+              f"'{out_fname}_metadata.csv'\n"
+              f"'{out_fname}_genenames.nucsv'\n"
+              f"'{out_fname}_localmeans.nucsv'\n"
+              f"'{out_fname}_localvars.nucsv'\n"
+              f"'{out_fname}_batchindices.nucsv'\n"
+              f"'{out_fname}_labels.nucsv'\n")
 
     @staticmethod
-    def _available_genes(dataset, on_ref, on="gene_names"):
-        indices = []
-        for gn in getattr(dataset, on):
-            indices.append(on_ref.index(gn))
-        return np.array(indices)
-
-    @staticmethod
-    def concat_datasets_union(*gene_datasets, on='gene_names', shared_labels=True, shared_batches=False):
+    def concat_datasets_union(
+        *gene_datasets,
+        on='gene_names',
+        shared_labels=True,
+        shared_batches=False
+    ):
         """
-        Combines multiple unlabelled gene_datasets based on the union of gene names intersection.
-        Datasets should all have gene_dataset.n_labels=0.
+        Combines multiple unlabelled gene_datasets based on the union of gene names.
         Batch indices are generated in the same order as datasets are given.
         :param gene_datasets: a sequence of gene_datasets object
         :return: a GeneExpressionDataset instance of the concatenated datasets
@@ -484,7 +499,7 @@ class UnionDataset(GeneExpressionDataset):
                 labels = []
                 for gene_dataset in gene_datasets:
                     mapping = [cell_types.index(cell_type) for cell_type in gene_dataset.cell_types]
-                    labels += [arrange_categories(gene_dataset.labels, mapping_to=mapping)[0]]
+                    labels += [remap_categories(gene_dataset.labels, mapping_to=mapping)[0]]
                 labels = np.concatenate(labels)
             else:
                 labels = np.concatenate([gene_dataset.labels for gene_dataset in gene_datasets])
