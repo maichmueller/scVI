@@ -7,12 +7,27 @@ from scvi.dataset.union import UnionDataset
 
 
 if __name__ == '__main__':
-    avail_dsets = [(file, Dataset10X) for group in available_datasets.values() for file in group]
-    # avail_dsets = []
-    avail_dsets.extend(
-        (elem for elem in zip([None]*5, (CortexDataset, PbmcDataset, CbmcDataset)))
+    available_datasets = [
+            "fresh_68k_pbmc_donor_a",
+            "frozen_pbmc_donor_a",
+            "frozen_pbmc_donor_b",
+            "frozen_pbmc_donor_c",
+            "pbmc8k",
+            "pbmc4k",
+            "t_3k",
+            "t_4k",
+            "pbmc_1k_protein_v3",
+            "pbmc_10k_protein_v3",
+            "malt_10k_protein_v3",
+            "pbmc_1k_v2",
+            "pbmc_1k_v3",
+            "pbmc_10k_v3"
+    ]
+    available_datasets = [(el, Dataset10X) for el in available_datasets]
+    available_datasets.extend(
+        (elem for elem in zip([None]*3, (CortexDataset, PbmcDataset, CbmcDataset)))
     )
-    # union_dataset = UnionDataset("./data", map_save_fname="complete_datasets_map", data_save_fname="complete_data_union")
-    union_dataset = UnionDataset("./data", map_fname="complete_datasets_map", data_save_fname="complete_data_union")
-    # union_dataset.build_mapping([elem[0] for elem in avail_dsets], [elem[1] for elem in avail_dsets])
-    union_dataset.concat_to_nucsv([elem[0] for elem in avail_dsets], [elem[1] for elem in avail_dsets])
+    # union_dataset = UnionDataset("./data", map_save_fname="human_data_map", data_save_fname="human_data_union")
+    union_dataset = UnionDataset("./data", map_fname="human_data_map", data_save_fname="human_data_union")
+    # union_dataset.build_mapping([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
+    union_dataset.concat_to_nucsv([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])

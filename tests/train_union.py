@@ -13,23 +13,10 @@ from scvi.models import VAE, SCANVI, VAEC
 import torch
 
 
-
-def concat_datasets_10x(save_path):
-    from scvi.dataset.dataset10X import available_datasets
-
-    datasets_10x = []
-    for idx, filen in enumerate(file for group in available_datasets.values() for file in group):
-        data = Dataset10X(filen, save_path)
-        if not data.dense and idx < 5:
-            datasets_10x.append(data)
-
-    datasets_10x_merged = UnionDataset.concat_datasets_union(*datasets_10x)
-    return datasets_10x_merged
-
-
-def train_vae(dataset, save_path, use_cuda=torch.cuda.is_available(), n_epochs=100, lr=0.01):
+def train_vae(dataset, save_path, use_cuda=True, n_epochs=100, lr=0.01):
     use_batches = False
-    vae = VAE(dataset.nb_genes, n_batch=dataset.n_batches * use_batches)
+    use_cuda = use_cuda and torch.cuda.is_available()
+    vae = VAE(dataset.nb_genes)
     trainer = UnsupervisedTrainer(
         vae,
         dataset,
@@ -47,6 +34,5 @@ def train_vae(dataset, save_path, use_cuda=torch.cuda.is_available(), n_epochs=1
 
 
 if __name__ == '__main__':
-    # data = concat_datasets_10x("./data/")
-    data = UnionDataset('./data', map_fname="all_data", data_fname="complete_data_union")
-    train_vae(data, "./data")
+    union_dataset = UnionDataset("./data", map_fname="human_data_map", data_fname="human_data_union")
+    train_vae(union_dataset, "./data")
