@@ -34,5 +34,5 @@ def train_vae(dataset, save_path, use_cuda=True, n_epochs=100, lr=0.01):
 
 
 if __name__ == '__main__':
-    union_dataset = UnionDataset("./data", map_fname="human_data_map", data_fname="human_data_union")
+    union_dataset = UnionDataset("./data", map_fname="ensembl_human_genes_proteincoding", data_fname="human_data_union")
     train_vae(union_dataset, "./data")

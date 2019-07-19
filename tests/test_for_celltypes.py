@@ -12,6 +12,7 @@ import sys
 from matplotlib import pyplot as plt
 import mygene
 
+
 def _load_dataset(
     ds_name,
     ds_class,

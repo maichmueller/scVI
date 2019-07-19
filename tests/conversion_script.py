@@ -28,6 +28,6 @@ if __name__ == '__main__':
         (elem for elem in zip([None]*3, (CortexDataset, PbmcDataset, CbmcDataset)))
     )
     # union_dataset = UnionDataset("./data", map_save_fname="human_data_map", data_save_fname="human_data_union")
-    union_dataset = UnionDataset("./data", map_fname="human_data_map", data_save_fname="human_data_union")
+    union_dataset = UnionDataset("./data", map_fname="ensembl_human_genes_proteincoding", data_save_fname="human_data_union")
     # union_dataset.build_mapping([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
     union_dataset.concat_to_nucsv([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])

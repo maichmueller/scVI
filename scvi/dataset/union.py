@@ -31,6 +31,7 @@ class UnionDataset(GeneExpressionDataset):
         super().__init__()
         self.gene_map = None
         self.gene_names = []
+        self.gene_names_converter = None
         self.gene_names_len = 0
 
         self.save_path = save_path
@@ -59,11 +60,10 @@ class UnionDataset(GeneExpressionDataset):
             ).loc[:, 1]
             self.gene_names = self.gene_map.index
             self.gene_names_len = len(self.gene_names)
-            self.datasets_used = pd.read_csv(
-                os.path.join(self.save_path, map_fname + "_used_datasets.csv"),
-                header=None,
-                index_col=0
-            ).loc[:, 1]
+            self.gene_names_converter = pd.read_csv(
+                os.path.join(save_path, "ensembl_human_conversion.csv"),
+                header=0
+            ).set_index("symbol")["ensembl_code"]
 
         if data_fname is not None:
             if not low_memory:
@@ -101,7 +101,8 @@ class UnionDataset(GeneExpressionDataset):
 
         data_and_files = []
         try:
-            gene_names_file = self._read_nonuniform_csv(self.gene_names_filepath, with_class_sep=True)
+            gene_names_file = self._read_nonuniform_csv(self.gene_names_filepath, with_class_sep=True)[0]
+            gene_names_file.index = pd.MultiIndex.from_tuples(gene_names_file.index)
             for attr, dtype in attributes_and_types.items():
                 try:
                     data_and_files.append((open(getattr(self, f"{attr}_filepath"), "rb"),
@@ -112,20 +113,24 @@ class UnionDataset(GeneExpressionDataset):
                     pass
 
             for i in indices:
-                line_off, ds_class, ds_fname = self.X_metadata.loc[i]
+                ds_class, ds_fname, X_off, lm_off, lv_off = self.X_metadata.loc[i]
                 for file, sample_container, attr, dtype in data_and_files:
-                    file.seek(line_off)
 
-                    if attr in ["X", "local_means", "local_vars"]:
-                        read_line = np.asarray(
-                            list(file.readline().decode().strip().split(","))
-                        ).astype(dtype).reshape(1, -1)
-                        if attr == "X":
-                            read_line = self.map_data(read_line,
-                                                      gene_names=gene_names_file.loc[(ds_class, ds_fname)]
-                                                      )
+                    if attr == "X":
+                        file.seek(X_off)
+                        read_line = np.asarray(list(file.readline().decode().strip().split(",")))
+                        read_line = self.map_data(read_line,
+                                                  gene_names=gene_names_file.loc[(ds_class, ds_fname)]
+                                                  )
+                    elif attr == "local_mean":
+                        file.seek(lm_off)
+                        read_line = np.asarray(list(file.readline().decode().strip().split(",")))
+                        read_line = read_line.astype(dtype).reshape(1, -1)
 
-                    elif attr in ["gene_names", "batch_indices", "labels"]:
+                    elif attr == "local_var":
+                        file.seek(lv_off)
+                        read_line = np.asarray(list(file.readline().decode().strip().split(",")))
+                    elif attr in ["batch_indices", "labels"]:
                         (read_class, read_fname), read_line = list(map(lambda el: el.split(","),
                                                                        file.readline().decode().strip().split(":")))
                         read_line = np.asarray(read_line).astype(dtype).reshape(1, -1)
@@ -153,7 +158,7 @@ class UnionDataset(GeneExpressionDataset):
             data = dict()
             with open(fname, 'rb') as file:
                 for line in file:
-                    (ds_class, ds_fname), line = line.decode().split(":")
+                    (ds_class, ds_fname), line = list(map(lambda x: x.split(","), line.decode().split(":")))
                     data[ds_class, ds_fname] = np.asarray(line).astype(str).reshape(1, -1)
             data = pd.DataFrame.from_dict(data, orient="index")
         else:
@@ -236,7 +241,7 @@ class UnionDataset(GeneExpressionDataset):
                 f"Dataset {(ds_class, ds_name)} doesn't have gene_names as attribute. Skipping this dataset.")
             return None
 
-        return dataset.gene_names, ds_class, ds_name
+        return dataset, ds_class, ds_name
 
     def _build_mapping_serial(self,
                               dataset_names,
@@ -285,7 +290,7 @@ class UnionDataset(GeneExpressionDataset):
             for future in as_completed(futures):
                 res = future.result()
                 if res is not None:
-                    total_genes = total_genes.union(res[0])
+                    total_genes = total_genes.union(res[0].gene_names)
                     filtered_classes[re.search(class_re_pattern, str(res[1])).group()].append(res[2])
 
         gene_map = {gene: pos for (gene, pos) in zip(total_genes, range(len(total_genes)))}
@@ -347,25 +352,15 @@ class UnionDataset(GeneExpressionDataset):
                  ):
 
         data_out = np.zeros((len(data), self.gene_names_len), dtype=float)
+        mappable_genes_indices = np.isin(gene_names, self.gene_map.index)
         try:
             col_indices = kwargs["col_indices"]
         except KeyError:
-            col_indices = [self.gene_map[gene] for gene in gene_names]
-        data_out[:, col_indices] = data
+            mappable_genes = gene_names[mappable_genes_indices]
+            col_indices = self.gene_map[mappable_genes]
 
+        data_out[:, col_indices] = data[mappable_genes_indices]
         return data_out
-
-    # @staticmethod
-    # def _getrow(data, idx_start, idx_end):
-    #     if isinstance(data, np.ndarray):
-    #         d_out = data[idx_start:idx_end]
-    #         return d_out.reshape(min(idx_end - idx_start, d_out.shape[0]), -1)
-    #     else:
-    #         # assuming scipy sparse instead
-    #         return np.concatenate(
-    #             [data.getrow(i).toarray() for i in range(idx_start, min(idx_end, data.shape[0]))],
-    #             axis=0
-    #         )
 
     def _getrow(self, idx_start, idx_end):
         if isinstance(self.dataset_holder, np.ndarray):
@@ -408,22 +403,20 @@ class UnionDataset(GeneExpressionDataset):
         except KeyError:
             shared_batches = False
 
-        offset = 0
+        X_offset = 0
+        lm_offset = 0
+        lv_offset = 0
         line_count = 0
-
-        used_datasets = dict()
-
-        mg_client = mygene.MyGeneInfo()
 
         # Build the group files for the dataset, under which the data is going to be stored
         # We will store the data in the following scheme:
-        # out_fname_X.fwf
-        # out_fname_metadata.fwf
-        # out_fname_gene_names.fwf
-        # out_fname_local_means.fwf
-        # out_fname_local_vars.fwf
-        # out_fname_batch_indices.fwf
-        # out_fname_labels.fwf
+        # out_fname_X.nucsv
+        # out_fname_metadata.csv
+        # out_fname_gene_names.nucsv
+        # out_fname_local_means.nucsv
+        # out_fname_local_vars.nucsv
+        # out_fname_batch_indices.nucsv
+        # out_fname_labels.nucsv
 
         file_open_mode = write_mode + 'b'  # store as binary
 
@@ -436,100 +429,102 @@ class UnionDataset(GeneExpressionDataset):
             open(self.save_path + '/' + out_fname + '_labels.nucsv', file_open_mode) as l:
 
             d_meta.write("line, offset, dataset_class, dataset_filename\n")
-            for dataset_fname, dataset_class, dataset_arg in zip(dataset_names, dataset_classes, dataset_args):
-                dataset_class_str = re.search(class_re_pattern, str(dataset_class)).group()
-                if self.datasets_used is not None:
-                    if dataset_class_str in self.datasets_used:
-                        sets = self.datasets_used[dataset_class_str]
-                        if sets:
-                            if str(dataset_fname) not in sets:
-                                continue
-                    else:
+            with ProcessPoolExecutor(1) as pool:
+                ds_queue = list(pool.submit(self._load_dataset,
+                                            dataset_fname,
+                                            dataset_class,
+                                            dataset_arg)
+                                for dataset_fname, dataset_class, dataset_arg in
+                                zip(dataset_names, dataset_classes, dataset_args)
+                                )
+                print(len(ds_queue))
+                for future in as_completed(ds_queue):
+                # for dataset_fname, dataset_class, dataset_arg in zip(dataset_names, dataset_classes, dataset_args):
+                    dataset, dataset_class, dataset_fname = future.result()
+                    dataset_class_str = re.search(class_re_pattern, str(dataset_class)).group()
+
+                    # if dataset_fname is None:
+                    #     if dataset_arg is not None:
+                    #         dataset = dataset_class(dataset_arg, save_path=self.save_path)
+                    #     else:
+                    #         dataset = dataset_class(save_path=self.save_path)
+                    # else:
+                    #     if dataset_arg is not None:
+                    #         dataset = dataset_class(dataset_fname, dataset_arg, save_path=self.save_path)
+                    #     else:
+                    #         dataset = dataset_class(dataset_fname, save_path=self.save_path)
+
+                    if dataset.gene_names is None:
+                        warnings.warn(f"Dataset {dataset_class_str}, {dataset_fname} doesn't have gene_names attribute."
+                                      f"Skipping it.")
                         continue
 
-                if dataset_fname is None:
-                    if dataset_arg is not None:
-                        dataset = dataset_class(dataset_arg, save_path=self.save_path)
-                    else:
-                        dataset = dataset_class(save_path=self.save_path)
-                else:
-                    if dataset_arg is not None:
-                        dataset = dataset_class(dataset_fname, dataset_arg, save_path=self.save_path)
-                    else:
-                        dataset = dataset_class(dataset_fname, save_path=self.save_path)
+                    # grab the necessary data parts:
+                    # aside from the data itself (X), the gene_names, local means, local_vars, batch_indices and labels
+                    # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we use
+                    data = dataset.X
+                    self.dataset_holder = data
+                    gene_names = dataset.gene_names.flatten()
+                    local_means = dataset.local_means.flatten()
+                    local_vars = dataset.local_vars.flatten()
+                    batch_indices = dataset.batch_indices.flatten()
+                    labels = dataset.labels.flatten()
 
-                if dataset.gene_names is None:
-                    continue
+                    len_data = len(dataset)
 
-                used_datasets[dataset_class_str] = dataset_fname
+                    print(f"Writing dataset {dataset_class_str, dataset_fname} of length {len_data} to file.")
+                    sys.stdout.flush()
 
-                # grab the necessary data parts:
-                # aside from the data itself (X), the gene_names, local means, local_vars, batch_indices and labels
-                # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we use
-                data = dataset.X
-                self.dataset_holder = data
-                gene_names = dataset.gene_names.flatten()
-                gene_names_ensembl = mg_client.querymany(gene_names, scopes='symbol', fields='ensembl.gene', species='human')
-                for gn in gene_names:
-                    search_ensembl = m.querymany(xli, scopes='symbol', fields='ensembl.gene', species='human')
-                    gene_names = []
-                local_means = dataset.local_means.flatten()
-                local_vars = dataset.local_vars.flatten()
-                batch_indices = dataset.batch_indices.flatten()
-                labels = dataset.labels.flatten()
+                    # pbar = tqdm(range(0, data.shape[0], nr_rows))
+                    # pbar.set_description(f"Iterations of {nr_rows} rows")
+                    # for row_start in pbar:
+                    #     rows = self._getrow(row_start, row_start + nr_rows)
+                    #     if not isinstance(rows, np.ndarray):
+                    #         rows = np.concatenate([row.toarray() for row in rows], axis=0)
+                    #
+                    #     rows = rows.astype(int)
+                    #     for row in rows:
+                    #         line = (",".join([str(entry) for entry in row]) + '\n').encode()
+                    #         d.write(line)
+                    #         d_meta.write(f"{line_count}, {offset}\n")
+                    #         offset += len(line)
+                    #         line_count += 1
 
-                len_data = len(dataset)
+                    proc_range = list(range(0, data.shape[0], nr_rows))
+                    with Pool(2) as pool:
+                        queue = tqdm(pool.starmap(self._getrow, [(row_start, row_start + nr_rows)
+                                                                 for row_start in proc_range]))
+                        queue.set_description(f"Iterations of {nr_rows} rows")
+                        for idx, rows in enumerate(queue):
+                            if not isinstance(rows, np.ndarray):
+                                rows = np.concatenate([row.toarray() for row in rows], axis=0)
+                            for row, local_mean, local_var in zip(rows, local_means.flatten(), local_vars.flatten()):
+                                X_line = (",".join([str(entry) for entry in row]) + '\n').encode()
+                                lm_line = (str(local_mean) + '\n').encode()
+                                lv_line = (str(local_var) + '\n').encode()
+                                d.write(X_line)
+                                lm.write(lm_line)
+                                lv.write(lv_line)
+                                d_meta.write(f"{line_count},{dataset_class_str},{dataset_fname},"
+                                             f"{X_offset},{lm_offset},{lv_offset}\n")
+                                X_offset += len(X_line)
+                                lm_offset += len(lm_line)
+                                lv_offset += len(lv_line)
+                                line_count += 1
 
-                print(f"Writing dataset {dataset_class_str, dataset_fname} of length {len_data} to file.")
-                sys.stdout.flush()
+                    gn.write(f"{dataset_class_str},{dataset_fname}:".encode())
+                    bi.write(f"{dataset_class_str},{dataset_fname}:".encode())
+                    l.write(f"{dataset_class_str},{dataset_fname}:".encode())
 
-                # pbar = tqdm(range(0, data.shape[0], nr_rows))
-                # pbar.set_description(f"Iterations of {nr_rows} rows")
-                # for row_start in pbar:
-                #     rows = self._getrow(row_start, row_start + nr_rows)
-                #     if not isinstance(rows, np.ndarray):
-                #         rows = np.concatenate([row.toarray() for row in rows], axis=0)
-                #
-                #     rows = rows.astype(int)
-                #     for row in rows:
-                #         line = (",".join([str(entry) for entry in row]) + '\n').encode()
-                #         d.write(line)
-                #         d_meta.write(f"{line_count}, {offset}\n")
-                #         offset += len(line)
-                #         line_count += 1
+                    gn.write((",".join([str(entry) for entry in gene_names]) + '\n').encode())
 
-                proc_range = list(range(0, data.shape[0], nr_rows))
-                # pbar = tqdm(proc_range)
-                # pbar.set_description(f"Writing raw data of dataset to file (in iterations of {nr_rows} rows)")
-                with Pool(2) as pool:
-                    queue = tqdm(pool.starmap(self._getrow, [(row_start, row_start + nr_rows)
-                                                             for row_start in proc_range]))
-                    queue.set_description(f"Iterations of {nr_rows} rows")
-                    for idx, rows in enumerate(queue):
-                        if not isinstance(rows, np.ndarray):
-                            rows = np.concatenate([row.toarray() for row in rows], axis=0)
-                        for row in rows:
-                            line = (",".join([str(entry) for entry in row]) + '\n').encode()
-                            d.write(line)
-                            d_meta.write(f"{line_count},{offset},{dataset_class_str},{dataset_fname}\n")
-                            offset += len(line)
-                            line_count += 1
+                    batch_indices += n_batch_offset
+                    n_batch_offset += dataset.n_batches if not shared_batches else 0
+                    bi.write((",".join([str(entry) for entry in batch_indices]) + '\n').encode())
 
-                gn.write(f"{dataset_class_str},{dataset_fname}:".encode())
-                bi.write(f"{dataset_class_str},{dataset_fname}:".encode())
-                l.write(f"{dataset_class_str},{dataset_fname}:".encode())
-
-                gn.write((",".join([str(entry) for entry in gene_names]) + '\n').encode())
-                lm.write((",".join([str(entry) for entry in local_means]) + '\n').encode())
-                lv.write((",".join([str(entry) for entry in local_vars]) + '\n').encode())
-
-                batch_indices += n_batch_offset
-                n_batch_offset += dataset.n_batches if not shared_batches else 0
-                bi.write((",".join([str(entry) for entry in batch_indices]) + '\n').encode())
-
-                labels += labels + n_labels_offset
-                n_labels_offset += dataset.n_labels
-                l.write((",".join([f"{entry}" for entry in labels]) + '\n').encode())
+                    labels += labels + n_labels_offset
+                    n_labels_offset += dataset.n_labels
+                    l.write((",".join([f"{entry}" for entry in labels]) + '\n').encode())
 
         print(f"Conversion completed to files: \n"
               f"'{out_fname}_data.nucsv'\n"
