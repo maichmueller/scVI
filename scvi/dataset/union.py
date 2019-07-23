@@ -8,13 +8,12 @@ from scvi.dataset.dataset import *
 import torch
 from torch.utils.data import Dataset
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from multiprocessing import cpu_count, Pool
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from multiprocessing import cpu_count, Pool, Lock, Process, Value
 import functools
 import sys
 from tqdm import tqdm
 import re
-import mygene
 
 class_re_pattern = r"((?<=[.])\w+(?='>))|((?<=class ')\w+(?='>))"
 
@@ -223,7 +222,7 @@ class UnionDataset(GeneExpressionDataset):
                       ds_args,
                       check_for_genenames=True
                       ):
-        print(f"{ds_class, ds_name}...")
+        print(f"Loading {ds_class, ds_name}.")
         if ds_name is not None:
             if ds_args is not None:
                 dataset = ds_class(ds_name, save_path=self.save_path, **ds_args)
@@ -362,24 +361,117 @@ class UnionDataset(GeneExpressionDataset):
         data_out[:, col_indices] = data[mappable_genes_indices]
         return data_out
 
-    def _getrow(self, idx_start, idx_end):
-        if isinstance(self.dataset_holder, np.ndarray):
-            d_out = self.dataset_holder[idx_start:idx_end]
+    def _getrow(self, data, idx_start, idx_end):
+        if isinstance(data, np.ndarray):
+            d_out = data[idx_start:idx_end]
             return d_out.reshape(min(idx_end - idx_start, d_out.shape[0]), -1)
         else:
-            return [self.dataset_holder.getrow(i)
-                    for i in range(idx_start, min(idx_end, self.dataset_holder.shape[0]))]
+            return [data.getrow(i)
+                    for i in range(idx_start, min(idx_end, data.shape[0]))]
 
     @staticmethod
     def _toarray(data):
         return data.toarray()
+
+    def _mp_ds_to_file(self,
+                       lock,
+                       dataset_class, dataset_fname, dataset_arg,
+                       out_fname, nr_rows,
+                       line_count, X_offset, lm_offset, lv_offset,
+                       n_batch_offset, n_labels_offset,
+                       shared_batches):
+
+        dataset_class_str = re.search(class_re_pattern, str(dataset_class)).group()
+
+        dataset, _, _ = self._load_dataset(dataset_fname, dataset_class, dataset_arg, True)
+
+        # grab the necessary data parts:
+        # aside from the data itself (X), the gene_names, local means, local_vars, batch_indices and labels
+        # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we use
+        data = dataset.X
+        gene_names = dataset.gene_names.flatten()
+        local_means = dataset.local_means.flatten()
+        local_vars = dataset.local_vars.flatten()
+        batch_indices = dataset.batch_indices.flatten()
+        labels = dataset.labels.flatten()
+
+        len_data = len(dataset)
+        n_batches = dataset.n_batches
+        n_labels = dataset.n_labels
+
+        print(f"Writing dataset {dataset_class_str, dataset_fname} of length {len_data} to file.")
+        sys.stdout.flush()
+
+        proc_range = list(range(0, data.shape[0], nr_rows))
+        with Pool(2) as pool:
+            queue = tqdm(pool.starmap(self._getrow, [(data, row_start, row_start + nr_rows)
+                                                     for row_start in proc_range]))
+
+            lock.acquire()
+            queue.set_description(f"Dataset {dataset_class_str, dataset_fname} in iterations of {nr_rows} rows")
+            for idx, rows in enumerate(queue):
+                if not isinstance(rows, np.ndarray):
+                    rows = np.concatenate([row.toarray() for row in rows], axis=0)
+                    args = (out_fname, rows, local_means, local_vars, gene_names,
+                            batch_indices, labels, dataset_class_str, dataset_fname, line_count,
+                            X_offset, lm_offset, lv_offset, n_batches, n_batch_offset, n_labels,
+                            n_labels_offset, shared_batches)
+
+                    Process(target=self._write_data, args=args).start()
+        lock.release()
+
+    def _write_data(self,
+                    out_fname,
+                    rows, local_means, local_vars, gene_names, batch_indices, labels,
+                    dataset_class_str, dataset_fname,
+                    line_count, X_offset, lm_offset, lv_offset,
+                    n_batches, n_batch_offset, n_labels, n_labels_offset,
+                    shared_batches=False):
+
+        file_open_mode = 'ab'  # store as binary
+
+        with open(self.save_path + '/' + out_fname + '_X.nucsv', file_open_mode) as d, \
+            open(self.save_path + '/' + out_fname + '_metadata.csv', "a") as d_meta, \
+            open(self.save_path + '/' + out_fname + '_gene_names.nucsv', file_open_mode) as gn, \
+            open(self.save_path + '/' + out_fname + '_local_means.nucsv', file_open_mode) as lm, \
+            open(self.save_path + '/' + out_fname + '_local_vars.nucsv', file_open_mode) as lv, \
+            open(self.save_path + '/' + out_fname + '_batch_indices.nucsv', file_open_mode) as bi, \
+            open(self.save_path + '/' + out_fname + '_labels.nucsv', file_open_mode) as l:
+
+            for row, local_mean, local_var in zip(rows, local_means.flatten(), local_vars.flatten()):
+
+                X_line = (",".join([str(entry) for entry in row]) + '\n').encode()
+                lm_line = (str(local_mean) + '\n').encode()
+                lv_line = (str(local_var) + '\n').encode()
+                d.write(X_line)
+                lm.write(lm_line)
+                lv.write(lv_line)
+                d_meta.write(f"{line_count.value},{dataset_class_str},{dataset_fname},"
+                             f"{X_offset.value},{lm_offset.value},{lv_offset.value}\n")
+                X_offset.value += len(X_line)
+                lm_offset.value += len(lm_line)
+                lv_offset.value += len(lv_line)
+                line_count.value += 1
+
+            gn.write(f"{dataset_class_str},{dataset_fname}:".encode())
+            bi.write(f"{dataset_class_str},{dataset_fname}:".encode())
+            l.write(f"{dataset_class_str},{dataset_fname}:".encode())
+
+            gn.write((",".join([str(entry) for entry in gene_names]) + '\n').encode())
+
+            batch_indices += n_batch_offset.value
+            n_batch_offset.value += n_batches if not shared_batches else 0
+            bi.write((",".join([str(entry) for entry in batch_indices]) + '\n').encode())
+
+            labels += labels + n_labels_offset.value
+            n_labels_offset.value += n_labels
+            l.write((",".join([f"{entry}" for entry in labels]) + '\n').encode())
 
     def concat_to_nucsv(self,
                         dataset_names,
                         dataset_classes,
                         dataset_args=None,
                         out_fname=None,
-                        write_mode="w",
                         nr_rows=100,
                         n_cpu=min(cpu_count() // 4, 1),
                         **kwargs
@@ -396,17 +488,19 @@ class UnionDataset(GeneExpressionDataset):
         if out_fname is None:
             out_fname = self.data_save_fname
 
-        n_batch_offset = 0
-        n_labels_offset = 0
         try:
             shared_batches = kwargs.pop("shared_batches")
         except KeyError:
             shared_batches = False
 
-        X_offset = 0
-        lm_offset = 0
-        lv_offset = 0
-        line_count = 0
+        lock = Lock()
+
+        X_offset = Value("i", 0)
+        lm_offset = Value("i", 0)
+        lv_offset = Value("i", 0)
+        line_count = Value("i", 0)
+        n_batch_offset = Value("i", 0)
+        n_labels_offset = Value("i", 0)
 
         # Build the group files for the dataset, under which the data is going to be stored
         # We will store the data in the following scheme:
@@ -418,113 +512,29 @@ class UnionDataset(GeneExpressionDataset):
         # out_fname_batch_indices.nucsv
         # out_fname_labels.nucsv
 
-        file_open_mode = write_mode + 'b'  # store as binary
+        with open(os.path.join(self.save_path, out_fname + '_X.nucsv'), "wb") as d, \
+            open(os.path.join(self.save_path, out_fname + '_metadata.csv'), "w") as d_meta, \
+            open(os.path.join(self.save_path, out_fname + '_gene_names.nucsv'), "wb") as gn, \
+            open(os.path.join(self.save_path, out_fname + '_local_means.nucsv'), "wb") as lm, \
+            open(os.path.join(self.save_path, out_fname + '_local_vars.nucsv'), "wb") as lv, \
+            open(os.path.join(self.save_path, out_fname + '_batch_indices.nucsv'), "wb") as bi, \
+            open(os.path.join(self.save_path, out_fname + '_labels.nucsv'), "wb") as l:
 
-        with open(self.save_path + '/' + out_fname + '_X.nucsv', file_open_mode) as d, \
-            open(self.save_path + '/' + out_fname + '_metadata.csv', write_mode) as d_meta, \
-            open(self.save_path + '/' + out_fname + '_gene_names.nucsv', file_open_mode) as gn, \
-            open(self.save_path + '/' + out_fname + '_local_means.nucsv', file_open_mode) as lm, \
-            open(self.save_path + '/' + out_fname + '_local_vars.nucsv', file_open_mode) as lv, \
-            open(self.save_path + '/' + out_fname + '_batch_indices.nucsv', file_open_mode) as bi, \
-            open(self.save_path + '/' + out_fname + '_labels.nucsv', file_open_mode) as l:
+            d_meta.write("line, dataset_class, dataset_filename, X_offset, lm_offset, lv_offset\n")
 
-            d_meta.write("line, offset, dataset_class, dataset_filename\n")
-            with ProcessPoolExecutor(1) as pool:
-                ds_queue = list(pool.submit(self._load_dataset,
-                                            dataset_fname,
-                                            dataset_class,
-                                            dataset_arg)
-                                for dataset_fname, dataset_class, dataset_arg in
-                                zip(dataset_names, dataset_classes, dataset_args)
-                                )
-                print(len(ds_queue))
-                for future in as_completed(ds_queue):
-                # for dataset_fname, dataset_class, dataset_arg in zip(dataset_names, dataset_classes, dataset_args):
-                    dataset, dataset_class, dataset_fname = future.result()
-                    dataset_class_str = re.search(class_re_pattern, str(dataset_class)).group()
-
-                    # if dataset_fname is None:
-                    #     if dataset_arg is not None:
-                    #         dataset = dataset_class(dataset_arg, save_path=self.save_path)
-                    #     else:
-                    #         dataset = dataset_class(save_path=self.save_path)
-                    # else:
-                    #     if dataset_arg is not None:
-                    #         dataset = dataset_class(dataset_fname, dataset_arg, save_path=self.save_path)
-                    #     else:
-                    #         dataset = dataset_class(dataset_fname, save_path=self.save_path)
-
-                    if dataset.gene_names is None:
-                        warnings.warn(f"Dataset {dataset_class_str}, {dataset_fname} doesn't have gene_names attribute."
-                                      f"Skipping it.")
-                        continue
-
-                    # grab the necessary data parts:
-                    # aside from the data itself (X), the gene_names, local means, local_vars, batch_indices and labels
-                    # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we use
-                    data = dataset.X
-                    self.dataset_holder = data
-                    gene_names = dataset.gene_names.flatten()
-                    local_means = dataset.local_means.flatten()
-                    local_vars = dataset.local_vars.flatten()
-                    batch_indices = dataset.batch_indices.flatten()
-                    labels = dataset.labels.flatten()
-
-                    len_data = len(dataset)
-
-                    print(f"Writing dataset {dataset_class_str, dataset_fname} of length {len_data} to file.")
-                    sys.stdout.flush()
-
-                    # pbar = tqdm(range(0, data.shape[0], nr_rows))
-                    # pbar.set_description(f"Iterations of {nr_rows} rows")
-                    # for row_start in pbar:
-                    #     rows = self._getrow(row_start, row_start + nr_rows)
-                    #     if not isinstance(rows, np.ndarray):
-                    #         rows = np.concatenate([row.toarray() for row in rows], axis=0)
-                    #
-                    #     rows = rows.astype(int)
-                    #     for row in rows:
-                    #         line = (",".join([str(entry) for entry in row]) + '\n').encode()
-                    #         d.write(line)
-                    #         d_meta.write(f"{line_count}, {offset}\n")
-                    #         offset += len(line)
-                    #         line_count += 1
-
-                    proc_range = list(range(0, data.shape[0], nr_rows))
-                    with Pool(2) as pool:
-                        queue = tqdm(pool.starmap(self._getrow, [(row_start, row_start + nr_rows)
-                                                                 for row_start in proc_range]))
-                        queue.set_description(f"Iterations of {nr_rows} rows")
-                        for idx, rows in enumerate(queue):
-                            if not isinstance(rows, np.ndarray):
-                                rows = np.concatenate([row.toarray() for row in rows], axis=0)
-                            for row, local_mean, local_var in zip(rows, local_means.flatten(), local_vars.flatten()):
-                                X_line = (",".join([str(entry) for entry in row]) + '\n').encode()
-                                lm_line = (str(local_mean) + '\n').encode()
-                                lv_line = (str(local_var) + '\n').encode()
-                                d.write(X_line)
-                                lm.write(lm_line)
-                                lv.write(lv_line)
-                                d_meta.write(f"{line_count},{dataset_class_str},{dataset_fname},"
-                                             f"{X_offset},{lm_offset},{lv_offset}\n")
-                                X_offset += len(X_line)
-                                lm_offset += len(lm_line)
-                                lv_offset += len(lv_line)
-                                line_count += 1
-
-                    gn.write(f"{dataset_class_str},{dataset_fname}:".encode())
-                    bi.write(f"{dataset_class_str},{dataset_fname}:".encode())
-                    l.write(f"{dataset_class_str},{dataset_fname}:".encode())
-
-                    gn.write((",".join([str(entry) for entry in gene_names]) + '\n').encode())
-
-                    batch_indices += n_batch_offset
-                    n_batch_offset += dataset.n_batches if not shared_batches else 0
-                    bi.write((",".join([str(entry) for entry in batch_indices]) + '\n').encode())
-
-                    labels += labels + n_labels_offset
-                    n_labels_offset += dataset.n_labels
-                    l.write((",".join([f"{entry}" for entry in labels]) + '\n').encode())
+        with ThreadPoolExecutor(2) as pool:
+            ds_queue = list(pool.submit(self._mp_ds_to_file,
+                                        lock,
+                                        dataset_class, dataset_fname, dataset_arg,
+                                        out_fname,
+                                        nr_rows,
+                                        line_count, X_offset, lm_offset, lv_offset,
+                                        n_batch_offset, n_labels_offset, shared_batches)
+                            for dataset_fname, dataset_class, dataset_arg in
+                            zip(dataset_names, dataset_classes, dataset_args)
+                            )
+            for future in as_completed(ds_queue):
+                future.result()
 
         print(f"Conversion completed to files: \n"
               f"'{out_fname}_data.nucsv'\n"
@@ -537,6 +547,172 @@ class UnionDataset(GeneExpressionDataset):
 
         self.set_filepaths(self.save_path, out_fname)
         return
+
+    # def concat_to_nucsv(self,
+    #                     dataset_names,
+    #                     dataset_classes,
+    #                     dataset_args=None,
+    #                     out_fname=None,
+    #                     write_mode="w",
+    #                     nr_rows=100,
+    #                     n_cpu=min(cpu_count() // 4, 1),
+    #                     **kwargs
+    #                     ):
+    #     if self.X is not None:
+    #         print(f'Data already built/loaded (potentially from file {self.map_fname}).')
+    #         return
+    #     if not self.low_memory:
+    #         print(f"Low memory setting is '{self.low_memory}'. Exiting")
+    #         return
+    #     if dataset_args is None:
+    #         dataset_args = [dataset_args] * len(dataset_names)
+    #
+    #     if out_fname is None:
+    #         out_fname = self.data_save_fname
+    #
+    #     n_batch_offset = 0
+    #     n_labels_offset = 0
+    #     try:
+    #         shared_batches = kwargs.pop("shared_batches")
+    #     except KeyError:
+    #         shared_batches = False
+    #
+    #     lock = Lock()
+    #
+    #     X_offset = 0
+    #     lm_offset = 0
+    #     lv_offset = 0
+    #     line_count = 0
+    #
+    #     # Build the group files for the dataset, under which the data is going to be stored
+    #     # We will store the data in the following scheme:
+    #     # out_fname_X.nucsv
+    #     # out_fname_metadata.csv
+    #     # out_fname_gene_names.nucsv
+    #     # out_fname_local_means.nucsv
+    #     # out_fname_local_vars.nucsv
+    #     # out_fname_batch_indices.nucsv
+    #     # out_fname_labels.nucsv
+    #
+    #     file_open_mode = write_mode + 'b'  # store as binary
+    #
+    #     with open(self.save_path + '/' + out_fname + '_X.nucsv', file_open_mode) as d, \
+    #         open(self.save_path + '/' + out_fname + '_metadata.csv', write_mode) as d_meta, \
+    #         open(self.save_path + '/' + out_fname + '_gene_names.nucsv', file_open_mode) as gn, \
+    #         open(self.save_path + '/' + out_fname + '_local_means.nucsv', file_open_mode) as lm, \
+    #         open(self.save_path + '/' + out_fname + '_local_vars.nucsv', file_open_mode) as lv, \
+    #         open(self.save_path + '/' + out_fname + '_batch_indices.nucsv', file_open_mode) as bi, \
+    #         open(self.save_path + '/' + out_fname + '_labels.nucsv', file_open_mode) as l:
+    #
+    #         d_meta.write("line, offset, dataset_class, dataset_filename\n")
+    #         with ThreadPoolExecutor(2) as pool:
+    #             ds_queue = list(pool.submit(self._load_dataset,
+    #                                         dataset_fname,
+    #                                         dataset_class,
+    #                                         dataset_arg)
+    #                             for dataset_fname, dataset_class, dataset_arg in
+    #                             zip(dataset_names, dataset_classes, dataset_args)
+    #                             )
+    #             print(len(ds_queue))
+    #             for future in as_completed(ds_queue):
+    #             # for dataset_fname, dataset_class, dataset_arg in zip(dataset_names, dataset_classes, dataset_args):
+    #                 dataset, dataset_class, dataset_fname = future.result()
+    #                 dataset_class_str = re.search(class_re_pattern, str(dataset_class)).group()
+    #
+    #                 # if dataset_fname is None:
+    #                 #     if dataset_arg is not None:
+    #                 #         dataset = dataset_class(dataset_arg, save_path=self.save_path)
+    #                 #     else:
+    #                 #         dataset = dataset_class(save_path=self.save_path)
+    #                 # else:
+    #                 #     if dataset_arg is not None:
+    #                 #         dataset = dataset_class(dataset_fname, dataset_arg, save_path=self.save_path)
+    #                 #     else:
+    #                 #         dataset = dataset_class(dataset_fname, save_path=self.save_path)
+    #
+    #                 if dataset.gene_names is None:
+    #                     warnings.warn(f"Dataset {dataset_class_str}, {dataset_fname} doesn't have gene_names attribute."
+    #                                   f"Skipping it.")
+    #                     continue
+    #
+    #                 # grab the necessary data parts:
+    #                 # aside from the data itself (X), the gene_names, local means, local_vars, batch_indices and labels
+    #                 # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we use
+    #                 data = dataset.X
+    #                 self.dataset_holder = data
+    #                 gene_names = dataset.gene_names.flatten()
+    #                 local_means = dataset.local_means.flatten()
+    #                 local_vars = dataset.local_vars.flatten()
+    #                 batch_indices = dataset.batch_indices.flatten()
+    #                 labels = dataset.labels.flatten()
+    #
+    #                 len_data = len(dataset)
+    #
+    #                 print(f"Writing dataset {dataset_class_str, dataset_fname} of length {len_data} to file.")
+    #                 sys.stdout.flush()
+    #
+    #                 # pbar = tqdm(range(0, data.shape[0], nr_rows))
+    #                 # pbar.set_description(f"Iterations of {nr_rows} rows")
+    #                 # for row_start in pbar:
+    #                 #     rows = self._getrow(row_start, row_start + nr_rows)
+    #                 #     if not isinstance(rows, np.ndarray):
+    #                 #         rows = np.concatenate([row.toarray() for row in rows], axis=0)
+    #                 #
+    #                 #     rows = rows.astype(int)
+    #                 #     for row in rows:
+    #                 #         line = (",".join([str(entry) for entry in row]) + '\n').encode()
+    #                 #         d.write(line)
+    #                 #         d_meta.write(f"{line_count}, {offset}\n")
+    #                 #         offset += len(line)
+    #                 #         line_count += 1
+    #
+    #                 proc_range = list(range(0, data.shape[0], nr_rows))
+    #                 with Pool(2) as pool:
+    #                     queue = tqdm(pool.starmap(self._getrow, [(row_start, row_start + nr_rows)
+    #                                                              for row_start in proc_range]))
+    #                     queue.set_description(f"Iterations of {nr_rows} rows")
+    #                     for idx, rows in enumerate(queue):
+    #                         if not isinstance(rows, np.ndarray):
+    #                             rows = np.concatenate([row.toarray() for row in rows], axis=0)
+    #                         for row, local_mean, local_var in zip(rows, local_means.flatten(), local_vars.flatten()):
+    #                             X_line = (",".join([str(entry) for entry in row]) + '\n').encode()
+    #                             lm_line = (str(local_mean) + '\n').encode()
+    #                             lv_line = (str(local_var) + '\n').encode()
+    #                             d.write(X_line)
+    #                             lm.write(lm_line)
+    #                             lv.write(lv_line)
+    #                             d_meta.write(f"{line_count},{dataset_class_str},{dataset_fname},"
+    #                                          f"{X_offset},{lm_offset},{lv_offset}\n")
+    #                             X_offset += len(X_line)
+    #                             lm_offset += len(lm_line)
+    #                             lv_offset += len(lv_line)
+    #                             line_count += 1
+    #
+    #                 gn.write(f"{dataset_class_str},{dataset_fname}:".encode())
+    #                 bi.write(f"{dataset_class_str},{dataset_fname}:".encode())
+    #                 l.write(f"{dataset_class_str},{dataset_fname}:".encode())
+    #
+    #                 gn.write((",".join([str(entry) for entry in gene_names]) + '\n').encode())
+    #
+    #                 batch_indices += n_batch_offset
+    #                 n_batch_offset += dataset.n_batches if not shared_batches else 0
+    #                 bi.write((",".join([str(entry) for entry in batch_indices]) + '\n').encode())
+    #
+    #                 labels += labels + n_labels_offset
+    #                 n_labels_offset += dataset.n_labels
+    #                 l.write((",".join([f"{entry}" for entry in labels]) + '\n').encode())
+    #
+    #     print(f"Conversion completed to files: \n"
+    #           f"'{out_fname}_data.nucsv'\n"
+    #           f"'{out_fname}_metadata.csv'\n"
+    #           f"'{out_fname}_genenames.nucsv'\n"
+    #           f"'{out_fname}_localmeans.nucsv'\n"
+    #           f"'{out_fname}_localvars.nucsv'\n"
+    #           f"'{out_fname}_batchindices.nucsv'\n"
+    #           f"'{out_fname}_labels.nucsv'\n")
+    #
+    #     self.set_filepaths(self.save_path, out_fname)
+    #     return
 
     @staticmethod
     def concat_datasets_union(*gene_datasets,
