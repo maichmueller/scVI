@@ -56,13 +56,14 @@ class UnionDataset(GeneExpressionDataset):
                 os.path.join(self.save_path, map_fname + ".csv"),
                 header=None,
                 index_col=0
-            ).loc[:, 1]
+            )
+            self.gene_map = self.gene_map.loc[:, self.gene_map.columns[0]]
             self.gene_names = self.gene_map.index
             self.gene_names_len = len(self.gene_names)
             self.gene_names_converter = pd.read_csv(
                 os.path.join(save_path, "ensembl_human_conversion.csv"),
                 header=0
-            ).set_index("symbol")["ensembl_code"]
+            ).set_index("Gene stable ID")["Gene name"]
 
         if data_fname is not None:
             if not low_memory:
@@ -157,7 +158,8 @@ class UnionDataset(GeneExpressionDataset):
             data = dict()
             with open(fname, 'rb') as file:
                 for line in file:
-                    (ds_class, ds_fname), line = list(map(lambda x: x.split(","), line.decode().split(":")))
+                    linelist = list(map(lambda x: x.split(","), line.decode().split(":")))
+                    (ds_class, ds_fname), line = linelist
                     data[ds_class, ds_fname] = np.asarray(line).astype(str).reshape(1, -1)
             data = pd.DataFrame.from_dict(data, orient="index")
         else:
