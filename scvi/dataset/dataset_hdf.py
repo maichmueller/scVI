@@ -157,8 +157,6 @@ def convert_to_hdf5(dataset_fnames_classes, save_path, out_fname):
             if not hasattr(dataset, "gene_names"):
                 continue
 
-            used_datasets.append([dataset_fname, dataset_class])
-
             # grab the necessary data parts:
             # aside from the data itself (X), the gene_names, local means, local_vars, batch_indices and labels
             # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we

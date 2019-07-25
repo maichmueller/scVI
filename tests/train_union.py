@@ -20,6 +20,10 @@ def train_vae(dataset, save_path, use_cuda=True, n_epochs=100, lr=0.01):
     trainer = UnsupervisedTrainer(
         vae,
         dataset,
+        data_loader_kwargs={
+            "batch_size": 16,
+            "pin_memory": use_cuda
+        },
         train_size=0.75,
         use_cuda=use_cuda,
         frequency=5,

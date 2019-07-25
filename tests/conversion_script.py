@@ -3,7 +3,7 @@ from scvi.dataset.cortex import CortexDataset
 from scvi.dataset.pbmc import PbmcDataset
 from scvi.dataset.brain_large import BrainLargeDataset
 from scvi.dataset.cite_seq import CbmcDataset
-from scvi.dataset.union import UnionDataset
+from scvi.dataset.union2 import UnionDataset
 
 
 if __name__ == '__main__':
@@ -30,4 +30,4 @@ if __name__ == '__main__':
     union_dataset = UnionDataset("./data", map_save_fname="human_data_map", data_save_fname="human_data_union")
     # union_dataset = UnionDataset("./tests/data", map_fname="ensembl_human_genes_proteincoding", data_save_fname="human_data_union")
     # union_dataset.build_mapping([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
-    union_dataset.concat_to_nucsv([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
+    union_dataset.concat_to_hdf5([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
