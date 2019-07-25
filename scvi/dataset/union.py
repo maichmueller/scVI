@@ -481,7 +481,7 @@ class UnionDataset(GeneExpressionDataset):
             _N_LABELS_OFFSET.value += n_labels
             l.write((",".join([f"{entry}" for entry in labels]) + '\n').encode())
 
-        print(f"{dataset_class_str, dataset_fname}: DONE! ({time.perf_counter() - s:.f} s)")
+        print(f"{dataset_class_str, dataset_fname}: DONE! ({time.perf_counter() - s:.2f}s)")
         _LOCK.release()
 
     def _write_data(self,
@@ -513,17 +513,20 @@ class UnionDataset(GeneExpressionDataset):
         @wraps(func)
         def wrapped(self, *args, **kwargs):
             out_fname = func(self, *args, **kwargs)
-            metadata_fname = os.path.join(self.save_path, out_fname + '_metadata.csv')
+
+            metadata_path = os.path.join(self.save_path, out_fname + '_metadata.csv')
+            # check if the file is already fully written to the disk before reading it
+            fsize = os.path.getsize(metadata_path)
             fully_written = False
             while not fully_written:
-                try:
-                    os.rename(metadata_fname, metadata_fname)
-                    print('Access on file "' + metadata_fname + '" is available!')
-                    fully_written = True
-                except OSError as e:
-                    print('Access-error on file "' + metadata_fname + '"! \n' + str(e))
-                    time.sleep(1)
-            metadata = pd.read_csv(metadata_fname,
+                fsize_new = os.path.getsize(metadata_path)
+                print('Access on file "' + metadata_path + '" is available!')
+                sys.stdout.flush()
+                fully_written = fsize == fsize_new
+                fsize = fsize_new
+                time.sleep(1)
+
+            metadata = pd.read_csv(metadata_path,
                                    header=0,
                                    index_col=0)
             metadata = metadata.sort_values(by=["X_offset"], axis=0)
@@ -541,7 +544,7 @@ class UnionDataset(GeneExpressionDataset):
                         dataset_args=None,
                         out_fname=None,
                         nr_rows=100,
-                        n_cpu=min(cpu_count(), 2),
+                        n_cpu=min(cpu_count() // 4, 4),
                         **kwargs
                         ):
         global _LOCK
