@@ -10,12 +10,21 @@ from torch.utils.data import Dataset
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from multiprocessing import cpu_count, Pool, Lock, Process, Value
-import functools
+from functools import wraps
 import sys
 from tqdm import tqdm
 import re
+import time
 
 class_re_pattern = r"((?<=[.])\w+(?='>))|((?<=class ')\w+(?='>))"
+
+_LOCK = None
+_X_OFFSET = None
+_LM_OFFSET = None
+_LV_OFFSET = None
+_LINE_COUNT = None
+_N_BATCH_OFFSET = None
+_N_LABELS_OFFSET = None
 
 
 class UnionDataset(GeneExpressionDataset):
@@ -54,10 +63,10 @@ class UnionDataset(GeneExpressionDataset):
         if map_fname is not None:
             self.gene_map = pd.read_csv(
                 os.path.join(self.save_path, map_fname + ".csv"),
-                header=None,
+                header=0,
                 index_col=0
-            )
-            self.gene_map = self.gene_map.loc[:, self.gene_map.columns[0]]
+            ).sort_index()
+            self.gene_map = pd.Series(range(len(self.gene_map)), index=self.gene_map.index)
             self.gene_names = self.gene_map.index
             self.gene_names_len = len(self.gene_names)
             self.gene_names_converter = pd.read_csv(
@@ -95,14 +104,10 @@ class UnionDataset(GeneExpressionDataset):
     def nb_genes(self) -> int:
         return self.gene_names_len
 
-    def collate_fn_base(self, attributes_and_types, indices):
-        indices = np.asarray(indices)
-        indices.sort()
-
+    def _mp_append_batch_elem(self, index, attributes_and_types, gene_names_file):
+        ds_class, ds_fname, X_off, lm_off, lv_off = self.X_metadata.loc[index]
         data_and_files = []
         try:
-            gene_names_file = self._read_nonuniform_csv(self.gene_names_filepath, with_class_sep=True)[0]
-            gene_names_file.index = pd.MultiIndex.from_tuples(gene_names_file.index)
             for attr, dtype in attributes_and_types.items():
                 try:
                     data_and_files.append((open(getattr(self, f"{attr}_filepath"), "rb"),
@@ -110,47 +115,75 @@ class UnionDataset(GeneExpressionDataset):
                                            attr,
                                            dtype))
                 except OSError:
-                    pass
+                    raise ValueError(f"File for attribute {attr} not available.")
 
-            for i in indices:
-                ds_class, ds_fname, X_off, lm_off, lv_off = self.X_metadata.loc[i]
-                for file, sample_container, attr, dtype in data_and_files:
+            for file, sample_container, attr, dtype in data_and_files:
 
-                    if attr == "X":
-                        file.seek(X_off)
-                        read_line = np.asarray(list(file.readline().decode().strip().split(",")))
-                        read_line = self.map_data(read_line,
-                                                  gene_names=gene_names_file.loc[(ds_class, ds_fname)]
-                                                  )
-                    elif attr == "local_mean":
-                        file.seek(lm_off)
-                        read_line = np.asarray(list(file.readline().decode().strip().split(",")))
-                        read_line = read_line.astype(dtype).reshape(1, -1)
+                if attr == "X":
+                    file.seek(X_off)
+                    read_line = file.readline().decode()
+                    print(read_line)
+                    read_line = read_line.strip().split(",")
+                    read_line = np.asarray(read_line, dtype=dtype).reshape(1, -1)
+                    read_line = self.map_data(read_line,
+                                              gene_names=gene_names_file[(ds_class, ds_fname)]
+                                              )
+                elif attr == "local_means":
+                    file.seek(lm_off)
+                    read_line = np.asarray(list(file.readline().decode().strip().split(",")), dtype=dtype)
+                    read_line = read_line.astype(dtype).reshape(1, -1)
 
-                    elif attr == "local_var":
-                        file.seek(lv_off)
-                        read_line = np.asarray(list(file.readline().decode().strip().split(",")))
-                    elif attr in ["batch_indices", "labels"]:
-                        (read_class, read_fname), read_line = list(map(lambda el: el.split(","),
-                                                                       file.readline().decode().strip().split(":")))
-                        read_line = np.asarray(read_line).astype(dtype).reshape(1, -1)
+                elif attr == "local_vars":
+                    file.seek(lv_off)
+                    read_line = np.asarray(list(file.readline().decode().strip().split(",")), dtype=dtype)
+                elif attr in ["batch_indices", "labels"]:
+                    (read_class, read_fname), read_line = list(map(lambda el: el.split(","),
+                                                                   file.readline().decode().strip().split(":")))
+                    read_line = np.asarray(read_line).astype(dtype).reshape(1, -1)
 
-                    else:
-                        raise ValueError(f"Attribute {attr} not supported by this dataset.")
+                else:
+                    raise ValueError(f"Attribute {attr} not supported by this dataset.")
 
-                    sample_container.append(read_line)
-
-            batch = []
-            for file, container, _, dtype in data_and_files:
-                batch.append(torch.from_numpy(np.vstack(container)))
-                file.close()
-            return tuple(batch)
+                sample_container.append(read_line)
 
         except Exception as e:
             if data_and_files:
                 for content in data_and_files:
                     content[0].close()
             raise e
+
+        output = []
+        for file, container, _, dtype in data_and_files:
+            output.append(torch.from_numpy(np.vstack(container)))
+            file.close()
+        return tuple(output)
+
+    def collate_fn_base(self,
+                        attributes_and_types,
+                        indices):
+        indices = np.asarray(indices)
+        indices.sort()
+
+        gene_names_file = self._read_nonuniform_csv(self.gene_names_filepath, with_class_sep=True)
+        # gene_names_file.index = pd.MultiIndex.from_tuples(gene_names_file.index)
+        batch = []
+        nr_attrs = len(attributes_and_types)
+        for _, _ in attributes_and_types.items():
+            batch.append([])
+        with Pool() as pool:
+            queue = tqdm(pool.starmap(self._mp_append_batch_elem,
+                                      [(index, attributes_and_types, gene_names_file)
+                                       for index in indices]))
+
+            queue.set_description("Loading batch from file")
+            for i, reads in enumerate(queue):
+                for k in range(nr_attrs):
+                    batch[k].append(reads[k])
+                print(i)
+
+        for i in range(nr_attrs):
+            batch[i] = torch.from_numpy(np.vstack(batch[i]))
+        return tuple(batch)
 
     @staticmethod
     def _read_nonuniform_csv(fname, with_class_sep=False, dtype=str):
@@ -160,8 +193,8 @@ class UnionDataset(GeneExpressionDataset):
                 for line in file:
                     linelist = list(map(lambda x: x.split(","), line.decode().split(":")))
                     (ds_class, ds_fname), line = linelist
-                    data[ds_class, ds_fname] = np.asarray(line).astype(str).reshape(1, -1)
-            data = pd.DataFrame.from_dict(data, orient="index")
+                    data[ds_class, ds_fname] = np.asarray(line).astype(str).reshape(-1)
+            # data = pd.DataFrame.from_dict(data, orient="index")
         else:
             data = []
             with open(fname, 'rb') as file:
@@ -351,16 +384,18 @@ class UnionDataset(GeneExpressionDataset):
                  *args,
                  **kwargs
                  ):
-
+        # print("Grabbing batch from file...", end="")
+        # s = time.perf_counter()
         data_out = np.zeros((len(data), self.gene_names_len), dtype=float)
         mappable_genes_indices = np.isin(gene_names, self.gene_map.index)
         try:
             col_indices = kwargs["col_indices"]
         except KeyError:
             mappable_genes = gene_names[mappable_genes_indices]
-            col_indices = self.gene_map[mappable_genes]
+            col_indices = self.gene_map[mappable_genes].values
 
-        data_out[:, col_indices] = data[mappable_genes_indices]
+        data_out[:, col_indices] = data[:, mappable_genes_indices.flatten()]
+        # print(f"done ({time.perf_counter()-s:.2f}s).")
         return data_out
 
     def _getrow(self, data, idx_start, idx_end):
@@ -376,11 +411,8 @@ class UnionDataset(GeneExpressionDataset):
         return data.toarray()
 
     def _mp_ds_to_file(self,
-                       lock,
                        dataset_class, dataset_fname, dataset_arg,
                        out_fname, nr_rows,
-                       line_count, X_offset, lm_offset, lv_offset,
-                       n_batch_offset, n_labels_offset,
                        shared_batches):
 
         dataset_class_str = re.search(class_re_pattern, str(dataset_class)).group()
@@ -401,59 +433,39 @@ class UnionDataset(GeneExpressionDataset):
         n_batches = dataset.n_batches
         n_labels = dataset.n_labels
 
-        print(f"Writing dataset {dataset_class_str, dataset_fname} of length {len_data} to file.")
         sys.stdout.flush()
 
         proc_range = list(range(0, data.shape[0], nr_rows))
-        with Pool(2) as pool:
-            queue = tqdm(pool.starmap(self._getrow, [(data, row_start, row_start + nr_rows)
-                                                     for row_start in proc_range]))
 
-            lock.acquire()
-            queue.set_description(f"Dataset {dataset_class_str, dataset_fname} in iterations of {nr_rows} rows")
+        # with ProcessPoolExecutor(cpu_count()//2) as pool:
+            # queue = tqdm(list(pool.submit(self._getrow,
+            #                               data,
+            #                               row_start,
+            #                               row_start + nr_rows)
+            #                   for row_start in proc_range))
+        with Pool(2) as pool:
+            queue = pool.starmap(self._getrow, [(data, row_start, row_start + nr_rows)
+                                                     for row_start in proc_range])
+
+            print(f"{dataset_class_str, dataset_fname}: Writing dataset of length {len_data} to file...")
+            s = time.perf_counter()
             for idx, rows in enumerate(queue):
+                # rows = rows_f.result()
                 if not isinstance(rows, np.ndarray):
                     rows = np.concatenate([row.toarray() for row in rows], axis=0)
-                    args = (out_fname, rows, local_means, local_vars, gene_names,
-                            batch_indices, labels, dataset_class_str, dataset_fname, line_count,
-                            X_offset, lm_offset, lv_offset, n_batches, n_batch_offset, n_labels,
-                            n_labels_offset, shared_batches)
+                    args = (out_fname, rows, local_means, local_vars,
+                            dataset_class_str, dataset_fname
+                            )
 
+                    _LOCK.acquire()
                     Process(target=self._write_data, args=args).start()
-        lock.release()
+                    _LOCK.release()
 
-    def _write_data(self,
-                    out_fname,
-                    rows, local_means, local_vars, gene_names, batch_indices, labels,
-                    dataset_class_str, dataset_fname,
-                    line_count, X_offset, lm_offset, lv_offset,
-                    n_batches, n_batch_offset, n_labels, n_labels_offset,
-                    shared_batches=False):
-
-        file_open_mode = 'ab'  # store as binary
-
-        with open(self.save_path + '/' + out_fname + '_X.nucsv', file_open_mode) as d, \
-            open(self.save_path + '/' + out_fname + '_metadata.csv', "a") as d_meta, \
-            open(self.save_path + '/' + out_fname + '_gene_names.nucsv', file_open_mode) as gn, \
-            open(self.save_path + '/' + out_fname + '_local_means.nucsv', file_open_mode) as lm, \
-            open(self.save_path + '/' + out_fname + '_local_vars.nucsv', file_open_mode) as lv, \
+        _LOCK.acquire()
+        file_open_mode = 'ab'  # append binary
+        with open(self.save_path + '/' + out_fname + '_gene_names.nucsv', file_open_mode) as gn, \
             open(self.save_path + '/' + out_fname + '_batch_indices.nucsv', file_open_mode) as bi, \
             open(self.save_path + '/' + out_fname + '_labels.nucsv', file_open_mode) as l:
-
-            for row, local_mean, local_var in zip(rows, local_means.flatten(), local_vars.flatten()):
-
-                X_line = (",".join([str(entry) for entry in row]) + '\n').encode()
-                lm_line = (str(local_mean) + '\n').encode()
-                lv_line = (str(local_var) + '\n').encode()
-                d.write(X_line)
-                lm.write(lm_line)
-                lv.write(lv_line)
-                d_meta.write(f"{line_count.value},{dataset_class_str},{dataset_fname},"
-                             f"{X_offset.value},{lm_offset.value},{lv_offset.value}\n")
-                X_offset.value += len(X_line)
-                lm_offset.value += len(lm_line)
-                lv_offset.value += len(lv_line)
-                line_count.value += 1
 
             gn.write(f"{dataset_class_str},{dataset_fname}:".encode())
             bi.write(f"{dataset_class_str},{dataset_fname}:".encode())
@@ -461,23 +473,85 @@ class UnionDataset(GeneExpressionDataset):
 
             gn.write((",".join([str(entry) for entry in gene_names]) + '\n').encode())
 
-            batch_indices += n_batch_offset.value
-            n_batch_offset.value += n_batches if not shared_batches else 0
+            batch_indices += _N_BATCH_OFFSET.value
+            _N_BATCH_OFFSET.value += n_batches if not shared_batches else 0
             bi.write((",".join([str(entry) for entry in batch_indices]) + '\n').encode())
 
-            labels += labels + n_labels_offset.value
-            n_labels_offset.value += n_labels
+            labels += labels + _N_LABELS_OFFSET.value
+            _N_LABELS_OFFSET.value += n_labels
             l.write((",".join([f"{entry}" for entry in labels]) + '\n').encode())
 
+        print(f"{dataset_class_str, dataset_fname}: DONE! ({time.perf_counter() - s:.f} s)")
+        _LOCK.release()
+
+    def _write_data(self,
+                    out_fname,
+                    rows, local_means, local_vars,
+                    dataset_class_str, dataset_fname,
+                    ):
+        file_open_mode = 'ab'  # append binary
+
+        with open(self.save_path + '/' + out_fname + '_X.nucsv', file_open_mode) as d, \
+            open(self.save_path + '/' + out_fname + '_metadata.csv', "a") as d_meta, \
+            open(self.save_path + '/' + out_fname + '_local_means.nucsv', file_open_mode) as lm, \
+            open(self.save_path + '/' + out_fname + '_local_vars.nucsv', file_open_mode) as lv:
+            for row, local_mean, local_var in zip(rows, local_means.flatten(), local_vars.flatten()):
+                X_line = (",".join([str(entry) for entry in row]) + '\n').encode()
+                lm_line = (str(local_mean) + '\n').encode()
+                lv_line = (str(local_var) + '\n').encode()
+                d.write(X_line)
+                lm.write(lm_line)
+                lv.write(lv_line)
+                d_meta.write(f"{_LINE_COUNT.value},{dataset_class_str},{dataset_fname},"
+                             f"{_X_OFFSET.value},{_LM_OFFSET.value},{_LV_OFFSET.value}\n")
+                _X_OFFSET.value += len(X_line)
+                _LM_OFFSET.value += len(lm_line)
+                _LV_OFFSET.value += len(lv_line)
+                _LINE_COUNT.value += 1
+
+    def _metadata_sorter(func):
+        @wraps(func)
+        def wrapped(self, *args, **kwargs):
+            out_fname = func(self, *args, **kwargs)
+            metadata_fname = os.path.join(self.save_path, out_fname + '_metadata.csv')
+            fully_written = False
+            while not fully_written:
+                try:
+                    os.rename(metadata_fname, metadata_fname)
+                    print('Access on file "' + metadata_fname + '" is available!')
+                    fully_written = True
+                except OSError as e:
+                    print('Access-error on file "' + metadata_fname + '"! \n' + str(e))
+                    time.sleep(1)
+            metadata = pd.read_csv(metadata_fname,
+                                   header=0,
+                                   index_col=0)
+            metadata = metadata.sort_values(by=["X_offset"], axis=0)
+            metadata.index = range(len(metadata))
+            print(all([metadata.index[i] < metadata.index[i + 1] for i in range(len(metadata) - 1)]))
+            metadata.to_csv(os.path.join(self.save_path, out_fname + '_metadata.csv'), header=True, index=True)
+            self.set_filepaths(self.save_path, out_fname)
+            return
+        return wrapped
+
+    @_metadata_sorter
     def concat_to_nucsv(self,
                         dataset_names,
                         dataset_classes,
                         dataset_args=None,
                         out_fname=None,
                         nr_rows=100,
-                        n_cpu=min(cpu_count() // 4, 1),
+                        n_cpu=min(cpu_count(), 2),
                         **kwargs
                         ):
+        global _LOCK
+        global _X_OFFSET
+        global _LM_OFFSET
+        global _LV_OFFSET
+        global _LINE_COUNT
+        global _N_BATCH_OFFSET
+        global _N_LABELS_OFFSET
+
         if self.X is not None:
             print(f'Data already built/loaded (potentially from file {self.map_fname}).')
             return
@@ -495,15 +569,6 @@ class UnionDataset(GeneExpressionDataset):
         except KeyError:
             shared_batches = False
 
-        lock = Lock()
-
-        X_offset = Value("i", 0)
-        lm_offset = Value("i", 0)
-        lv_offset = Value("i", 0)
-        line_count = Value("i", 0)
-        n_batch_offset = Value("i", 0)
-        n_labels_offset = Value("i", 0)
-
         # Build the group files for the dataset, under which the data is going to be stored
         # We will store the data in the following scheme:
         # out_fname_X.nucsv
@@ -514,6 +579,7 @@ class UnionDataset(GeneExpressionDataset):
         # out_fname_batch_indices.nucsv
         # out_fname_labels.nucsv
 
+        # open once to override existing files
         with open(os.path.join(self.save_path, out_fname + '_X.nucsv'), "wb") as d, \
             open(os.path.join(self.save_path, out_fname + '_metadata.csv'), "w") as d_meta, \
             open(os.path.join(self.save_path, out_fname + '_gene_names.nucsv'), "wb") as gn, \
@@ -522,16 +588,24 @@ class UnionDataset(GeneExpressionDataset):
             open(os.path.join(self.save_path, out_fname + '_batch_indices.nucsv'), "wb") as bi, \
             open(os.path.join(self.save_path, out_fname + '_labels.nucsv'), "wb") as l:
 
-            d_meta.write("line, dataset_class, dataset_filename, X_offset, lm_offset, lv_offset\n")
+            d_meta.write("line,dataset_class,dataset_filename,X_offset,lm_offset,lv_offset\n")
 
-        with ThreadPoolExecutor(2) as pool:
+        _LOCK = Lock()
+        _X_OFFSET = Value("i", 0)
+        _LM_OFFSET = Value("i", 0)
+        _LV_OFFSET = Value("i", 0)
+        _LINE_COUNT = Value("i", 0)
+        _N_BATCH_OFFSET = Value("i", 0)
+        _N_LABELS_OFFSET = Value("i", 0)
+
+        # initargs = (lock, X_offset, lm_offset, lv_offset, line_count, n_batch_offset, n_labels_offset)
+        # init_globals(*initargs)
+        with ThreadPoolExecutor(n_cpu) as pool:
             ds_queue = list(pool.submit(self._mp_ds_to_file,
-                                        lock,
                                         dataset_class, dataset_fname, dataset_arg,
                                         out_fname,
                                         nr_rows,
-                                        line_count, X_offset, lm_offset, lv_offset,
-                                        n_batch_offset, n_labels_offset, shared_batches)
+                                        shared_batches)
                             for dataset_fname, dataset_class, dataset_arg in
                             zip(dataset_names, dataset_classes, dataset_args)
                             )
@@ -547,8 +621,7 @@ class UnionDataset(GeneExpressionDataset):
               f"'{out_fname}_batchindices.nucsv'\n"
               f"'{out_fname}_labels.nucsv'\n")
 
-        self.set_filepaths(self.save_path, out_fname)
-        return
+        return out_fname
 
     # def concat_to_nucsv(self,
     #                     dataset_names,
@@ -805,3 +878,4 @@ class UnionDataset(GeneExpressionDataset):
         return result
 
     _type_dispatch = staticmethod(_type_dispatch)
+    _metadata_sorter = staticmethod(_metadata_sorter)
