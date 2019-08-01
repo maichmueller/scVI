@@ -3,7 +3,7 @@ from scvi.dataset.cortex import CortexDataset
 from scvi.dataset.pbmc import PbmcDataset
 from scvi.dataset.brain_large import BrainLargeDataset
 from scvi.dataset.cite_seq import CbmcDataset
-from scvi.dataset.union2 import UnionDataset
+from scvi.dataset.union import UnionDataset
 
 
 if __name__ == '__main__':
@@ -12,8 +12,8 @@ if __name__ == '__main__':
             # "frozen_pbmc_donor_a",
             # "frozen_pbmc_donor_b",
             # "frozen_pbmc_donor_c",
-            "pbmc8k",
-            "pbmc4k",
+            # "pbmc8k",
+            # "pbmc4k",
             "t_3k",
             "t_4k",
             # "pbmc_1k_protein_v3",

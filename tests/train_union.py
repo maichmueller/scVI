@@ -6,7 +6,7 @@
 
 import numpy as np
 
-from scvi.dataset import union2, GeneExpressionDataset, Dataset10X, UnionDataset
+from scvi.dataset import union, GeneExpressionDataset, Dataset10X, UnionDataset
 from scvi.inference import UnsupervisedTrainer
 from scvi.models import VAE, SCANVI, VAEC
 import matplotlib.pyplot as plt
@@ -52,8 +52,8 @@ if __name__ == '__main__':
             # "frozen_pbmc_donor_a",
             # "frozen_pbmc_donor_b",
             # "frozen_pbmc_donor_c",
-            "pbmc8k",
-            "pbmc4k",
+            # "pbmc8k",
+            # "pbmc4k",
             "t_3k",
             "t_4k",
             # "pbmc_1k_protein_v3",
@@ -71,7 +71,7 @@ if __name__ == '__main__':
     union_dataset = UnionDataset("./data",
                                  map_fname="ensembl_human_genes_proteincoding",
                                  data_fname="human_data_union",
-                                 low_memory=True)
+                                 low_memory=False)
     # union_dataset.build_mapping([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
     # union_dataset.concat_union_in_memory([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
     # union_dataset = UnionDataset("./data", map_fname="ensembl_human_genes_proteincoding", data_fname="human_data_union")

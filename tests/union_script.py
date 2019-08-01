@@ -3,7 +3,7 @@ from scvi.dataset.cortex import CortexDataset
 from scvi.dataset.pbmc import PbmcDataset
 from scvi.dataset.brain_large import BrainLargeDataset
 from scvi.dataset.cite_seq import CbmcDataset
-from scvi.dataset.union2 import UnionDataset
+from scvi.dataset.union import UnionDataset
 
 
 if __name__ == '__main__':
