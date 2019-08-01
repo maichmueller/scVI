@@ -64,14 +64,10 @@ coverage: ## check code coverage quickly with the default Python
 	coverage html
 	$(BROWSER) htmlcov/index.html
 
-profile: ## profile the run_benchmark script with the default Python
-	python -m cProfile -o program.prof ./run_benchmarks.py --dataset brain_large --epochs 10
-	snakeviz program.prof
-
 docs: ## generate Sphinx HTML documentation, including API docs
 	rm -f docs/scvi.rst
 	rm -f docs/modules.rst
-	sphinx-apidoc -o docs/ scvi
+	sphinx-apidoc -f -o docs/ scvi
 	$(MAKE) -C docs clean
 	$(MAKE) -C docs html
 	$(BROWSER) docs/_build/html/index.html

@@ -34,8 +34,9 @@ setup_requirements = ["pytest-runner"]
 
 test_requirements = ["pytest"]
 
-extras_requirements = {"test": ["scanpy", "louvain", "leidenalg>=0.7.0", "python-igraph>=0.7.1", ]}
-
+extras_requirements = {
+    "test": ["scanpy", "louvain", "leidenalg>=0.7.0", "python-igraph>=0.7.1", "colour"]
+}
 author = (
     "Romain Lopez, "
     "Jeffrey Regier, "
@@ -76,6 +77,6 @@ setup(
     tests_require=test_requirements,
     extras_require=extras_requirements,
     url="https://github.com/YosefLab/scVI",
-    version="0.3.0",
+    version="0.4.0",
     zip_safe=False,
 )
