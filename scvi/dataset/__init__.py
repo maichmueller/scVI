@@ -26,6 +26,7 @@ from scvi.dataset.synthetic import (
     ZISyntheticDatasetCorr,
 )
 from scvi.dataset.union import UnionDataset
+from scvi.dataset.ebidata import EbiData
 
 
 

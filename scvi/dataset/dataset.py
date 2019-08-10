@@ -1009,6 +1009,9 @@ class GeneExpressionDataset(Dataset):
         )
 
         self.update_cells(subset_cells)
+        # needs remapping of the labels to 0...N, otherwise other hardcoded solutions might break
+        self.labels, self.n_labels = remap_categories(self.labels, labels_to_keep, list(range(len(cell_types))))
+        self.cell_types = cell_types
 
     def _get_cells_filter_mask_by_attribute(
         self,
@@ -1062,11 +1065,7 @@ class GeneExpressionDataset(Dataset):
             data = getattr(self, version_name)
             setattr(self, version_name, data[subset_cells])
 
-        logger.info(
-            "Downsampled from {nb_cells} to {new_nb_cells} cells".format(
-                nb_cells=nb_cells_old, new_nb_cells=self.nb_cells
-            )
-        )
+        logger.info(f"Downsampled from {nb_cells_old} to {self.nb_cells} cells")
 
     def merge_cell_types(
         self,

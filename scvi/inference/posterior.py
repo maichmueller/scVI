@@ -10,6 +10,7 @@ import scipy
 import torch
 import torch.distributions as distributions
 
+import matplotlib as mpl
 from matplotlib import pyplot as plt
 from scipy.stats import kde, entropy
 from sklearn.cluster import KMeans
@@ -33,6 +34,8 @@ from scvi.models.log_likelihood import (
     compute_reconstruction_error,
     compute_marginal_log_likelihood,
 )
+
+import itertools
 
 logger = logging.getLogger(__name__)
 
@@ -901,12 +904,16 @@ class Posterior:
         self,
         n_samples=1000,
         color_by="",
+        colors=None,
         save_name="",
         latent=None,
         batch_indices=None,
         labels=None,
         n_batch=None,
+        max_nr_labels=100,
+        **kwargs
     ):
+        lgd = None
         # If no latent representation is given
         if latent is None:
             latent, batch_indices, labels = self.get_latent(sample=True)
@@ -931,12 +938,27 @@ class Posterior:
                     plt_labels = self.gene_dataset.cell_types
                 else:
                     plt_labels = [str(i) for i in range(len(np.unique(indices)))]
-                plt.figure(figsize=(10, 10))
+                plt.figure(figsize=(16, 16))
+                if colors is None:
+                    cs = plt.get_cmap("tab20", min(max_nr_labels, n))
+                    cmap = lambda i, l: cs(i)
+                else:
+                    cmap = lambda i, l: colors[l]
+                # prop_cycler = itertools.cycle(mpl.rcParams['axes.prop_cycle'])
+                plt.margins(0)
                 for i, label in zip(range(n), plt_labels):
+                    # colour = next(prop_cycler)['color']
+                    color = mpl.colors.to_hex(cmap(i, label))
+                    # if i < max_nr_labels:
                     plt.scatter(
-                        latent[indices == i, 0], latent[indices == i, 1], label=label
+                        latent[indices == i, 0], latent[indices == i, 1], c=color, label=label, **kwargs
                     )
-                plt.legend()
+                    # else:
+                    #     plt.scatter(
+                    #         latent[indices == i, 0], latent[indices == i, 1], c=color, **kwargs
+                    #     )
+                lgd = plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
+                                 fancybox=True, shadow=True, ncol=4)
             elif color_by == "batches and labels":
                 fig, axes = plt.subplots(1, 2, figsize=(14, 7))
                 batch_indices = batch_indices.ravel()
@@ -967,7 +989,10 @@ class Posterior:
         plt.axis("off")
         plt.tight_layout()
         if save_name:
-            plt.savefig(save_name)
+            if lgd is not None:
+                plt.savefig(save_name, bbox_extra_artists=(lgd,), bbox_inches='tight')
+            else:
+                plt.savefig(save_name, bbox_inches='tight')
 
     @staticmethod
     def apply_t_sne(latent, n_samples=1000):

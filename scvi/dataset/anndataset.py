@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 
-from scvi.dataset.dataset import DownloadableDataset, GeneExpressionDataset
+from scvi.dataset.dataset import DownloadableDataset, GeneExpressionDataset, remap_categories
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +32,63 @@ class AnnDatasetFromAnnData(GeneExpressionDataset):
             self.var,
             self.varm,
             self.uns,
-        ) = extract_data_from_anndata(ad)
+        ) = self.extract_data_from_anndata(ad)
         self.populate_from_data(
             X=X,
             batch_indices=batch_indices,
             gene_names=gene_names,
             cell_types=cell_types,
+            labels=labels
         )
         self.filter_cells_by_count()
+
+    @staticmethod
+    def extract_data_from_anndata(ad: anndata.AnnData):
+        data, labels, batch_indices, gene_names, cell_types = None, None, None, None, None
+
+        # treat all possible cases according to anndata doc
+        if isinstance(ad.X, np.ndarray):
+            data = ad.X.copy()
+        if isinstance(ad.X, pd.DataFrame):
+            data = ad.X.values
+        if isinstance(ad.X, csr_matrix):
+            # keep sparsity above 1 Gb in dense form
+            if reduce(operator.mul, ad.X.shape) * ad.X.dtype.itemsize < 1e9:
+                logger.info("Dense size under 1Gb, casting to dense format (np.ndarray).")
+                data = ad.X.toarray()
+            else:
+                data = ad.X.copy()
+
+        gene_names = np.asarray(ad.var.index.values, dtype=str)
+
+        if "batch_indices" in ad.obs.columns:
+            batch_indices = ad.obs["batch_indices"].values
+
+        if "cell_types" in ad.obs.columns:
+            cell_types = ad.obs["cell_types"]
+            labels = cell_types.values
+            cell_types = cell_types.drop_duplicates().values.astype(str)
+            labels, _ = remap_categories(labels, mapping_from=cell_types)
+            # labels = cell_types.rank(method="dense").astype("int")
+            # labels.index = cell_types.values
+            # cell_types = labels.drop_duplicates().sort_values().index.values.astype("str")
+            # labels = labels.values
+
+        if "labels" in ad.obs.columns:
+            labels = ad.obs["labels"]
+
+        return (
+            data,
+            batch_indices,
+            labels,
+            gene_names,
+            cell_types,
+            ad.obs,
+            ad.obsm,
+            ad.var,
+            ad.varm,
+            ad.uns,
+        )
 
 
 class DownloadableAnnDataset(DownloadableDataset):
@@ -100,46 +149,3 @@ class DownloadableAnnDataset(DownloadableDataset):
             cell_types=cell_types,
         )
         self.filter_cells_by_count()
-
-
-def extract_data_from_anndata(ad: anndata.AnnData):
-    data, labels, batch_indices, gene_names, cell_types = None, None, None, None, None
-
-    # treat all possible cases according to anndata doc
-    if isinstance(ad.X, np.ndarray):
-        data = ad.X.copy()
-    if isinstance(ad.X, pd.DataFrame):
-        data = ad.X.values
-    if isinstance(ad.X, csr_matrix):
-        # keep sparsity above 1 Gb in dense form
-        if reduce(operator.mul, ad.X.shape) * ad.X.dtype.itemsize < 1e9:
-            logger.info("Dense size under 1Gb, casting to dense format (np.ndarray).")
-            data = ad.X.toarray()
-        else:
-            data = ad.X.copy()
-
-    gene_names = np.asarray(ad.var.index.values, dtype=str)
-
-    if "batch_indices" in ad.obs.columns:
-        batch_indices = ad.obs["batch_indices"].values
-
-    if "cell_types" in ad.obs.columns:
-        cell_types = ad.obs["cell_types"]
-        labels = cell_types.rank(method="dense").values.astype("int")
-        cell_types = cell_types.drop_duplicates().values.astype("str")
-
-    if "labels" in ad.obs.columns:
-        labels = ad.obs["labels"]
-
-    return (
-        data,
-        batch_indices,
-        labels,
-        gene_names,
-        cell_types,
-        ad.obs,
-        ad.obsm,
-        ad.var,
-        ad.varm,
-        ad.uns,
-    )

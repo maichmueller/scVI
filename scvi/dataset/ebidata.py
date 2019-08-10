@@ -25,8 +25,9 @@ class EbiData(AnnDatasetFromAnnData):
         else:
             adata = scanpy.datasets.ebi_expression_atlas(experiment, filter_boring=filter_boring)
         adata.obs = adata.obs.rename(columns={'Sample Characteristic[inferred cell type]': "cell_types"})
+        # for i, barcode in enumerate(pd.unique(adata.obs["batch_indices"])):
+        #     adata.obs["batch_indices"][adata.obs["batch_indices"] == barcode] = i
         super().__init__(adata)
-        x=3
 
 
 # incompatability of data reader in original scanpy with mouse dataset. Patching with hotfix

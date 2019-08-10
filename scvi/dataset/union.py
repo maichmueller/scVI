@@ -111,7 +111,7 @@ class UnionDataset(GeneExpressionDataset):
                 self._set_attributes(data_fname)
                 self._cache_processed_gene_names()
             else:
-                self.concat_union_in_memory(True)
+                self.concat_union_into_memory(True)
 
     def __len__(self):
         return self._len
@@ -335,11 +335,11 @@ class UnionDataset(GeneExpressionDataset):
         gene_map = {gene: pos for (gene, pos) in zip(total_genes, range(len(total_genes)))}
         return gene_map
 
-    def concat_to_hdf5(self,
-                       dataset_names,
-                       dataset_classes,
-                       dataset_args=None,
-                       out_fname=None):
+    def concat_union_into_hdf5(self,
+                               dataset_names,
+                               dataset_classes,
+                               dataset_args=None,
+                               out_fname=None):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Stores the final
         dataset onto a Hdf5 file with out_fname filename.
@@ -432,13 +432,61 @@ class UnionDataset(GeneExpressionDataset):
         self._set_attributes(out_fname)
         return self
 
-    def concat_union_in_memory(self,
-                               from_file: bool,
-                               dataset_names=None,
-                               dataset_classes=None,
-                               dataset_args=None,
-                               shared_batches=False
-                               ):
+    def concat_union_from_memory(self,
+                                 gene_datasets: List[GeneExpressionDataset]
+                                 ):
+        """
+        Combines multiple unlabelled gene_datasets based on a mapping of gene names. Loads the final
+        dataset directly into memory.
+        :param gene_datasets: List, the loaded data sets of (inherited) class GeneExpressionDataset to concatenate.
+        :return: self (populated with data)
+        """
+
+        X = []
+        local_means = []
+        local_vars = []
+        batch_indices = []
+        labels = []
+        cell_types = []
+        for gene_dataset in gene_datasets:
+            X.append(sp_sparse.csr_matrix(self.map_data(gene_dataset.X, gene_dataset.gene_names)))
+            local_means.append(gene_dataset.local_means)
+            local_vars.append(gene_dataset.local_vars)
+            batch_indices.append(gene_dataset.batch_indices)
+            labels.append(gene_dataset.labels)
+            if gene_dataset.cell_types is not None:
+                cell_types.append(gene_dataset.cell_types)
+                labels[-1] = cell_types[-1][labels[-1]]
+            else:
+                cell_types.append(np.zeros((len(X[-1])), dtype=str))
+                labels[-1] = labels[-1] - 1
+        cell_types = np.sort(np.unique(np.concatenate(cell_types)))
+        cell_types_map = pd.Series(range(len(cell_types)), index=cell_types)
+        labels = np.concatenate(labels)
+
+        for i, cell_type in np.ndenumerate(labels):
+            if cell_type != -1:
+                if cell_type != "undefined":
+                    labels[i] = cell_types_map[cell_type]
+
+        self.populate_from_data(X=sp_sparse.vstack(X),
+                                batch_indices=np.concatenate(batch_indices),
+                                labels=labels,
+                                gene_names=self.gene_names,
+                                cell_types=cell_types
+                                )
+        self.local_means = np.vstack(local_means)
+        self.local_vars = np.vstack(local_vars)
+        self._len = self.X.shape[0]
+        return self
+
+    def concat_union_into_memory(self,
+                                 from_file: bool,
+                                 dataset_names=None,
+                                 dataset_classes=None,
+                                 dataset_args=None,
+                                 shared_batches=False
+                                 ):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Loads the final
         dataset directly into memory.
@@ -489,7 +537,7 @@ class UnionDataset(GeneExpressionDataset):
         for i, label in enumerate(labels):
             if label != 0:
                 cell_type = cell_types[i]
-                if cell_type != "0":
+                if cell_type != "undefined":
                     labels[i] = cell_types_map[cell_type]
 
         self.populate_from_data(X=sp_sparse.vstack(X),
@@ -570,6 +618,8 @@ class UnionDataset(GeneExpressionDataset):
                 )
             )
         self._X = X
+        if hasattr(X, "shape"):
+            self._len = X.shape[0]
 
     @property
     def nb_genes(self) -> int:

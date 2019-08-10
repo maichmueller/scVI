@@ -50,6 +50,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 tests/data/*
+tests/plots/*
 ./tests/data
 # Translations
 *.mo
