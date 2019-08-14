@@ -30,4 +30,4 @@ if __name__ == '__main__':
     union_dataset = UnionDataset("./data", map_save_fname="human_data_map", data_save_fname="human_data_union")
     # union_dataset = UnionDataset("./tests/data", map_fname="ensembl_human_genes_proteincoding", data_save_fname="human_data_union")
     # union_dataset.build_mapping([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
-    union_dataset.concat_union_into_hdf5([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
+    union_dataset.union_into_hdf5([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])

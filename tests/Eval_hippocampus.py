@@ -8,7 +8,7 @@ if __name__ == '__main__':
 
     data_full = EbiData("./data", experiment="E-ENAD-15")
     data_big_mapped = UnionDataset("./data", map_fname="ensembl_mouse_genes-proteincoding", low_memory=False)
-    data_big_mapped.concat_union_from_memory([data_full])
+    data_big_mapped.union_from_memory([data_full])
     data_big_mapped.filter_cell_types(np.array([ct for ct in data_big_mapped.cell_types if ct != "not available"]))
 
     agg = data_full.obs.groupby(["Sample Characteristic[organism part]", "cell_types"]).size()

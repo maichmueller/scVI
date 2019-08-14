@@ -19,7 +19,14 @@ class AnnDatasetFromAnnData(GeneExpressionDataset):
     :param ad: ``anndata.AnnData`` instance.
     """
 
-    def __init__(self, ad: anndata.AnnData):
+    def __init__(self, ad: anndata.AnnData,
+                 cell_types_column_name="cell_types",
+                 batch_indices_column_name="batch_indices",
+                 labels_column_name="labels"):
+        ad.obs.rename(columns={cell_types_column_name: "cell_types",
+                               batch_indices_column_name: "batch_indices",
+                               labels_column_name: "labels"},
+                      inplace=True)
         super().__init__()
         (
             X,

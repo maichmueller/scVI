@@ -60,7 +60,7 @@ def plot_tsne(trainer, model, dataset, model_savename, n_samples_tsne=5000, colo
     posterior.show_t_sne(n_samples=n_samples_tsne,
                          labels=dataset.labels,
                          color_by='labels',
-                         colors=colors,
+                         colormap=colors,
                          save_name=f"{model_savename}_tsne.png",
                          **kwargs)
     plt.show()
@@ -70,10 +70,9 @@ def plot_tsne(trainer, model, dataset, model_savename, n_samples_tsne=5000, colo
 if __name__ == '__main__':
 
     np.random.seed(1)
-
     data_full = EbiData("./data", experiment="E-ENAD-15")
     data_big = UnionDataset("./data", map_fname="ensembl_mouse_genes-proteincoding", low_memory=False)
-    data_big.concat_union_from_memory([data_full])
+    data_big.union_from_memory([data_full])
     data_big.filter_cell_types(np.array([ct for ct in data_big.cell_types if ct != "not available"]))
 
     nr_ct = len(data_big.cell_types)

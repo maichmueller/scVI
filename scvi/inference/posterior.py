@@ -904,15 +904,19 @@ class Posterior:
         self,
         n_samples=1000,
         color_by="",
-        colors=None,
+        colormap=None,
         save_name="",
         latent=None,
         batch_indices=None,
         labels=None,
         n_batch=None,
         max_nr_labels=100,
+        dpi=600,
+        image_datatype="png",
         **kwargs
     ):
+        marker_styles = ["o", "v", "^", "<", ">", "1", "2", "3", "4", "8", "s", "p", "P", "*", "h", "H", "+",
+                         "x", "X", "D", "d"]
         lgd = None
         # If no latent representation is given
         if latent is None:
@@ -939,19 +943,19 @@ class Posterior:
                 else:
                     plt_labels = [str(i) for i in range(len(np.unique(indices)))]
                 plt.figure(figsize=(16, 16))
-                if colors is None:
-                    cs = plt.get_cmap("tab20", min(max_nr_labels, n))
-                    cmap = lambda i, l: cs(i)
-                else:
-                    cmap = lambda i, l: colors[l]
-                # prop_cycler = itertools.cycle(mpl.rcParams['axes.prop_cycle'])
+                if colormap is None:
+                    colormap = plt.get_cmap("tab20", min(n, 20))
+
+                unique_marker_color_combos = itertools.product(marker_styles,
+                                                               (mpl.colors.to_hex(colormap(i))
+                                                                for i in range(colormap.N))
+                                                               )
                 plt.margins(0)
                 for i, label in zip(range(n), plt_labels):
-                    # colour = next(prop_cycler)['color']
-                    color = mpl.colors.to_hex(cmap(i, label))
                     # if i < max_nr_labels:
+                    marker, color = next(unique_marker_color_combos)
                     plt.scatter(
-                        latent[indices == i, 0], latent[indices == i, 1], c=color, label=label, **kwargs
+                        latent[indices == i, 0], latent[indices == i, 1], c=color, marker=marker, label=label, **kwargs
                     )
                     # else:
                     #     plt.scatter(
@@ -990,9 +994,9 @@ class Posterior:
         plt.tight_layout()
         if save_name:
             if lgd is not None:
-                plt.savefig(save_name, bbox_extra_artists=(lgd,), bbox_inches='tight')
+                plt.savefig(f"{save_name}.{image_datatype}", dpi=dpi, bbox_extra_artists=(lgd,), bbox_inches='tight')
             else:
-                plt.savefig(save_name, bbox_inches='tight')
+                plt.savefig(f"{save_name}.{image_datatype}", dpi=dpi, bbox_inches='tight')
 
     @staticmethod
     def apply_t_sne(latent, n_samples=1000):

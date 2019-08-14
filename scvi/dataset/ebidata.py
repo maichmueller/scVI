@@ -6,10 +6,23 @@ import os.path as path
 import anndata
 from zipfile import ZipFile
 import pandas as pd
+import urllib
+from urllib.request import urlretrieve, urlopen
+from urllib.error import HTTPError
+from zipfile import ZipFile
+
+from tqdm import tqdm
 
 
 class EbiData(AnnDatasetFromAnnData):
-    def __init__(self, save_path, experiment="E-ENAD-15", filter_boring: bool = False):
+    def __init__(self,
+                 save_path,
+                 experiment="E-ENAD-15",
+                 result_file="filtered",
+                 filter_boring: bool = False,
+                 cell_types_column_name="Sample Characteristic[inferred cell type]",
+                 batch_indices_column_name="",
+                 labels_column_name=""):
         settings = ScanpyConfig()
         settings.datasetdir = save_path
         filepath = path.join(save_path, experiment)
@@ -21,13 +34,41 @@ class EbiData(AnnDatasetFromAnnData):
                 adata, obs = read_archive(filepath)
                 adata.obs[obs.columns] = obs
                 if filter_boring:
-                    adata.obs = scanpy.datasets._ebi_expression_atlas._filter_boring(adata.obs)
+                    adata.obs = _filter_boring(adata.obs)
         else:
+            experiment_dir = settings.datasetdir / experiment
+            dataset_path = experiment_dir / "{}.h5ad".format(experiment)
+            try:
+                adata = anndata.read(dataset_path)
+                if filter_boring:
+                    adata.obs = _filter_boring(adata.obs)
+            except OSError:
+                # Dataset couldn't be read for whatever reason
+                pass
+
+            download_experiment(experiment, result_file=result_file)
+
+            print("Downloaded {} to {}".format(experiment, experiment_dir.absolute()))
+
+            with ZipFile(experiment_dir / "expression_archive.zip", "r") as f:
+                adata = read_expression_from_archive(f)
+            obs = pd.read_csv(
+                experiment_dir / "experimental_design.tsv", sep="\t", index_col=0
+            )
+
+            adata.obs[obs.columns] = obs
+            adata.write(dataset_path, compression="gzip")  # To be kind to disk space
+
+            if filter_boring:
+                adata.obs = _filter_boring(adata.obs)
+
             adata = scanpy.datasets.ebi_expression_atlas(experiment, filter_boring=filter_boring)
-        adata.obs = adata.obs.rename(columns={'Sample Characteristic[inferred cell type]': "cell_types"})
         # for i, barcode in enumerate(pd.unique(adata.obs["batch_indices"])):
         #     adata.obs["batch_indices"][adata.obs["batch_indices"] == barcode] = i
-        super().__init__(adata)
+        super().__init__(adata,
+                         cell_types_column_name=cell_types_column_name,
+                         batch_indices_column_name=batch_indices_column_name,
+                         labels_column_name=labels_column_name)
 
 
 # incompatability of data reader in original scanpy with mouse dataset. Patching with hotfix
@@ -63,6 +104,93 @@ def read_expression_from_archive(archive: ZipFile):
     adata.var_names = varname
     adata.obs_names = obsname
     return adata
+
+
+def _filter_boring(dataframe):
+    unique_vals = dataframe.apply(lambda x: len(x.unique()))
+    is_boring = (unique_vals == 1) | (unique_vals == len(dataframe))
+    return dataframe.loc[:, ~is_boring]
+
+
+# Copied from tqdm examples
+def tqdm_hook(t):
+    """
+    Wraps tqdm instance.
+
+    Don't forget to close() or __exit__()
+    the tqdm instance once you're done with it (easiest using `with` syntax).
+    Example
+    -------
+    >>> with tqdm(...) as t:
+    ...     reporthook = my_hook(t)
+    ...     urllib.urlretrieve(..., reporthook=reporthook)
+    """
+    last_b = [0]
+
+    def update_to(b=1, bsize=1, tsize=None):
+        """
+        b  : int, optional
+            Number of blocks transferred so far [default: 1].
+        bsize  : int, optional
+            Size of each block (in tqdm units) [default: 1].
+        tsize  : int, optional
+            Total size (in tqdm units). If [default: None] remains unchanged.
+        """
+        if tsize is not None:
+            t.total = tsize
+        t.update((b - last_b[0]) * bsize)
+        last_b[0] = b
+
+    return update_to
+
+
+def sniff_url(accession):
+    # Note that data is downloaded from gxa/sc/experiment, not experiments
+    base_url = "https://www.ebi.ac.uk/gxa/sc/experiments/{}/".format(accession)
+    try:
+        with urlopen(base_url) as req:  # Check if server up/ dataset exists
+            pass
+    except HTTPError as e:
+        e.msg = e.msg + " ({})".format(base_url)  # Report failed url
+        raise
+
+
+def download_experiment(accession,
+                        result_file="filtered"):
+    sniff_url(accession)
+
+    base_url = "https://www.ebi.ac.uk/gxa/sc/experiment/{}/".format(accession)
+    quantification_path = f"download/zip?fileType=quantification-{result_file}&accessKey="
+    sampledata_path = "download?fileType=experiment-design&accessKey="
+
+    experiment_dir = scanpy.settings.datasetdir / accession
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    with tqdm(
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        miniters=1,
+        desc="experimental_design.tsv",
+    ) as t:
+        urlretrieve(
+            base_url + sampledata_path,
+            experiment_dir / "experimental_design.tsv",
+            reporthook=tqdm_hook(t),
+        )
+    with tqdm(
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        miniters=1,
+        desc="expression_archive.zip",
+    ) as t:
+        urlretrieve(
+            base_url + quantification_path,
+            experiment_dir / "expression_archive.zip",
+            reporthook=tqdm_hook(t),
+        )
+
 
 scanpy.datasets._ebi_expression_atlas.read_expression_from_archive = read_expression_from_archive
 

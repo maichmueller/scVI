@@ -68,7 +68,8 @@ class UnionDataset(GeneExpressionDataset):
                  map_fname=None,
                  map_save_fname=None,
                  data_fname=None,
-                 data_save_fname=None
+                 data_save_fname=None,
+                 gene_name_conversion_map_fname=None
                  ):
         super().__init__()
         self._len = None
@@ -98,26 +99,35 @@ class UnionDataset(GeneExpressionDataset):
                 header=0,
                 index_col=0
             ).sort_index()
+            self.gene_map.index = self.gene_map.index.astype(str).str.lower()
             self.gene_map = pd.Series(range(len(self.gene_map)), index=self.gene_map.index)
             self.gene_names = self.gene_map.index
             self.gene_names_len = len(self.gene_names)
-            self.gene_names_converter = pd.read_csv(
-                os.path.join(save_path, "ensembl_human_conversion.csv"),
-                header=0
-            ).set_index("Gene stable ID")["Gene name"]
+            self.gene_names_converter = None
+            if gene_name_conversion_map_fname is not None:
+                gn_converter = pd.read_csv(
+                    os.path.join(save_path, gene_name_conversion_map_fname),
+                    header=0,
+                    index_col=0
+                )
+                self.gene_names_converter.index = gn_converter.index.str.lower()
 
         if data_fname is not None:
             if low_memory:
                 self._set_attributes(data_fname)
                 self._cache_processed_gene_names()
             else:
-                self.concat_union_into_memory(True)
+                self.union_into_memory(True)
 
     def __len__(self):
         return self._len
 
     def __getitem__(self, idx):
         return idx
+
+    def convert_gene_names(self, gene_names):
+        new_names = self.gene_names_converter.loc[gene_names].values
+        return new_names
 
     def collate_fn_base(self,
                         attributes_and_types,
@@ -211,7 +221,7 @@ class UnionDataset(GeneExpressionDataset):
         try:
             mappable_genes_indices = kwargs["mappable_genes_indices"]
         except KeyError:
-            mappable_genes_indices = np.isin(gene_names, self.gene_map.index)
+            mappable_genes_indices = np.isin(np.char.lower(gene_names), self.gene_map.index)
         try:
             col_indices = kwargs["col_indices"]
         except KeyError:
@@ -335,11 +345,11 @@ class UnionDataset(GeneExpressionDataset):
         gene_map = {gene: pos for (gene, pos) in zip(total_genes, range(len(total_genes)))}
         return gene_map
 
-    def concat_union_into_hdf5(self,
-                               dataset_names,
-                               dataset_classes,
-                               dataset_args=None,
-                               out_fname=None):
+    def union_into_hdf5(self,
+                        dataset_names,
+                        dataset_classes,
+                        dataset_args=None,
+                        out_fname=None):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Stores the final
         dataset onto a Hdf5 file with out_fname filename.
@@ -432,9 +442,10 @@ class UnionDataset(GeneExpressionDataset):
         self._set_attributes(out_fname)
         return self
 
-    def concat_union_from_memory(self,
-                                 gene_datasets: List[GeneExpressionDataset]
-                                 ):
+    def union_from_memory(self,
+                          gene_datasets: List[GeneExpressionDataset],
+                          convert_gene_names=False
+                          ):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Loads the final
         dataset directly into memory.
@@ -449,7 +460,10 @@ class UnionDataset(GeneExpressionDataset):
         labels = []
         cell_types = []
         for gene_dataset in gene_datasets:
-            X.append(sp_sparse.csr_matrix(self.map_data(gene_dataset.X, gene_dataset.gene_names)))
+            gene_names = np.char.lower(gene_dataset.gene_names)
+            if convert_gene_names:
+                gene_names = self.convert_gene_names(gene_dataset.gene_names)
+            X.append(sp_sparse.csr_matrix(self.map_data(gene_dataset.X, gene_names)))
             local_means.append(gene_dataset.local_means)
             local_vars.append(gene_dataset.local_vars)
             batch_indices.append(gene_dataset.batch_indices)
@@ -478,15 +492,18 @@ class UnionDataset(GeneExpressionDataset):
         self.local_means = np.vstack(local_means)
         self.local_vars = np.vstack(local_vars)
         self._len = self.X.shape[0]
+
+        logger.info(f"Joined {len(gene_datasets)} datasets to one of shape {self._len} x {self.gene_names_len}.")
+
         return self
 
-    def concat_union_into_memory(self,
-                                 from_file: bool,
-                                 dataset_names=None,
-                                 dataset_classes=None,
-                                 dataset_args=None,
-                                 shared_batches=False
-                                 ):
+    def union_into_memory(self,
+                          from_file: bool,
+                          dataset_names=None,
+                          dataset_classes=None,
+                          dataset_args=None,
+                          shared_batches=False
+                          ):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Loads the final
         dataset directly into memory.

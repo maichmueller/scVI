@@ -32,5 +32,5 @@ if __name__ == '__main__':
                                  map_fname="ensembl_human_genes_proteincoding",
                                  data_save_fname="human_data_union")
     # union_dataset.build_mapping([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
-    union_dataset.concat_union_into_memory([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
+    union_dataset.union_into_memory([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
 
