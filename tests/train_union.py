@@ -77,5 +77,5 @@ if __name__ == '__main__':
     # data = UnionDataset("./data", map_fname="ensembl_human_genes_proteincoding", data_fname="human_data_union")
     union_data = UnionDataset("./data", map_fname="ensembl_mouse_genes-proteincoding", low_memory=False)
     data = EbiData("./data", experiment="E-ENAD-15")
-    union_data.union_from_memory([data])
+    union_data._union_from_memory_to_memory([data])
     train_vae(union_data, save_path="./data", model_savename="ebi_data_vae_full", n_epochs=100)

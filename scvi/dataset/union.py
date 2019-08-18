@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 import numpy as np
 import pandas as pd
@@ -24,7 +23,10 @@ class_re_pattern = r"((?<=[.])[A-Za-z_0-9]+(?='>))|((?<=class ')\w+(?='>))"
 
 
 class AttrLoaderHdf5:
-    def __init__(self, attr, hdf5_filepath=None, index_map=None):
+    def __init__(self,
+                 attr,
+                 hdf5_filepath=None,
+                 index_map=None):
         self.attr = attr
         self.hdf5_filepath = hdf5_filepath
         self.index_map = None
@@ -77,7 +79,7 @@ class UnionDataset(GeneExpressionDataset):
         self.gene_names = []
         self.gene_names_converter = None
         self.gene_names_len = 0
-        self.gene_names_processed = None
+        self.cached_gene_mapping = None
 
         self.save_path = save_path
         self.line_offsets = None
@@ -115,9 +117,9 @@ class UnionDataset(GeneExpressionDataset):
         if data_fname is not None:
             if low_memory:
                 self._set_attributes(data_fname)
-                self._cache_processed_gene_names()
+                self._cache_gene_mapping()
             else:
-                self.union_into_memory(True)
+                self._union_read_hdf5_into_memory(data_fname)
 
     def __len__(self):
         return self._len
@@ -136,7 +138,7 @@ class UnionDataset(GeneExpressionDataset):
         indices = np.asarray(indices)
         indices.sort()
         if self.low_memory:
-            self._cache_processed_gene_names()
+            self._cache_gene_mapping()
 
             batch = defaultdict(list)
             h5_acc_dict = defaultdict(list)
@@ -146,10 +148,10 @@ class UnionDataset(GeneExpressionDataset):
                 h5_acc_dict[ds_specifier].append(index)
             for ds_specifier, ds_indices in h5_acc_dict.items():
                 for attr, dtype in attributes_and_types.items():
-                    elems = getattr(self, "X")[ds_indices]
+                    elems = getattr(self, attr)[ds_indices]
                     if attr == "X":
                         elems = np.vstack(elems).astype(dtype)
-                        col_indices, map_gene_ind = self.gene_names_processed[ds_specifier]
+                        col_indices, map_gene_ind = self.cached_gene_mapping[ds_specifier]
                         elems = self.map_data(elems,
                                               mappable_genes_indices=map_gene_ind,
                                               col_indices=col_indices
@@ -174,10 +176,6 @@ class UnionDataset(GeneExpressionDataset):
                                 hdf5_filepath=self.hdf5_filepath, index_map=self.index_map)
         self.gene_names = MetaAttrLoaderHdf5("gene_names",
                                              hdf5_filepath=self.hdf5_filepath, index_map=self.index_map)
-        self.local_means = AttrLoaderHdf5("local_means",
-                                          hdf5_filepath=self.hdf5_filepath, index_map=self.index_map)
-        self.local_vars = AttrLoaderHdf5("local_vars",
-                                         hdf5_filepath=self.hdf5_filepath, index_map=self.index_map)
         self.batch_indices = MetaAttrLoaderHdf5("batch_indices",
                                                 hdf5_filepath=self.hdf5_filepath, index_map=self.index_map)
         self.labels = MetaAttrLoaderHdf5("labels",
@@ -194,18 +192,18 @@ class UnionDataset(GeneExpressionDataset):
                     self.index_map.extend([(group_name, i) for i in range(shape[0])])
         return
 
-    def _cache_processed_gene_names(self, ) -> None:
-        if not self.gene_names_processed:
-            self.gene_names_processed = dict()
+    def _cache_gene_mapping(self, ) -> None:
+        if not self.cached_gene_mapping:
+            self.cached_gene_mapping = dict()
             with h5py.File(self.hdf5_filepath, "r") as h5_file:
                 # Walk through all groups, extracting datasets
                 for group_name, group in h5_file.items():
-                    gene_names = group["gene_names"]
+                    gene_names = np.char.lower(group["gene_names"])
                     mappable_genes_indices = np.isin(gene_names, self.gene_map.index)
                     mappable_genes = gene_names[mappable_genes_indices]
                     col_indices = self.gene_map[mappable_genes].values
                     col_indices.sort()
-                    self.gene_names_processed[group_name] = (col_indices, mappable_genes_indices.flatten())
+                    self.cached_gene_mapping[group_name] = (col_indices, mappable_genes_indices.flatten())
         return
 
     def map_data(self,
@@ -235,7 +233,7 @@ class UnionDataset(GeneExpressionDataset):
                       ds_name,
                       ds_class,
                       ds_args,
-                      check_for_genenames=True
+                      check_for_gene_annotation=True
                       ):
         print(f"Loading {ds_class, ds_name}.")
         if ds_name is not None:
@@ -249,7 +247,7 @@ class UnionDataset(GeneExpressionDataset):
             else:
                 dataset = ds_class(save_path=self.save_path)
 
-        if check_for_genenames and dataset.gene_names is None:
+        if check_for_gene_annotation and dataset.gene_names is None:
             # without gene names we can't build a proper mapping
             warnings.warn(
                 f"Dataset {(ds_class, ds_name)} doesn't have gene_names as attribute. Skipping this dataset.")
@@ -345,11 +343,40 @@ class UnionDataset(GeneExpressionDataset):
         gene_map = {gene: pos for (gene, pos) in zip(total_genes, range(len(total_genes)))}
         return gene_map
 
-    def union_into_hdf5(self,
-                        dataset_names,
-                        dataset_classes,
-                        dataset_args=None,
-                        out_fname=None):
+    def join_datasets(self,
+                      data_source: str,
+                      data_target: str,
+                      **kwargs):
+
+        if data_source not in ["memory", "hdf5", "scvi"]:
+            raise ValueError(f"Parameter 'data_source={data_source}' not supported.")
+        if data_target not in ["memory", "hdf5"]:
+            raise ValueError(f"Parameter 'data_target={data_target}' not supported.")
+
+        if data_source == "memory":
+            if data_target == "memory":
+                self._union_combine_memory_into_memory(**kwargs)
+            elif data_target == "hdf5":
+                self._union_drop_memory_into_hdf5(**kwargs)
+        elif data_source == "hdf5":
+            if data_target == "memory":
+                self._union_read_hdf5_into_memory(**kwargs)
+            elif data_target == "hdf5":
+                self._union_combine_hdf5_into_hdf5(**kwargs)
+        elif data_source == "scvi":
+            if data_target == "memory":
+                self._union_read_dsets_into_memory(**kwargs)
+            elif data_target == "hdf5":
+                self._union_combine_dsets_into_hdf5(**kwargs)
+        else:
+            raise ValueError(f"Parameter 'data_source={data_source}' not supported.")
+        return self
+
+    def _union_combine_dsets_into_hdf5(self,
+                                       dataset_names,
+                                       dataset_classes,
+                                       dataset_args=None,
+                                       out_fname=None):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Stores the final
         dataset onto a Hdf5 file with out_fname filename.
@@ -390,9 +417,7 @@ class UnionDataset(GeneExpressionDataset):
                     # there are no guaranteed attributes of each dataset. Thus for now these will be the ones we
                     # work with
                     X = dataset.X
-                    gene_names = dataset.gene_names
-                    local_means = dataset.local_means
-                    local_vars = dataset.local_vars
+                    gene_names = np.char.lower(dataset.gene_names)
                     batch_indices = dataset.batch_indices
                     labels = dataset.labels
 
@@ -404,8 +429,6 @@ class UnionDataset(GeneExpressionDataset):
                     # --1st DS CLASS and NAME
                     # ------ X
                     # ------ gene_names
-                    # ------ local_means
-                    # ------ local_vars
                     # ------ batch_indices
                     # ------ labels
                     # ------ (cell_types)
@@ -428,8 +451,6 @@ class UnionDataset(GeneExpressionDataset):
                     else:
                         dataset_hdf5_g.create_dataset("X", data=X)
                     dataset_hdf5_g.create_dataset("gene_names", data=gene_names.astype(np.dtype("S")), dtype=string_dt)
-                    dataset_hdf5_g.create_dataset("local_means", data=local_means)
-                    dataset_hdf5_g.create_dataset("local_vars", data=local_vars)
                     dataset_hdf5_g.create_dataset("batch_indices", data=batch_indices)
                     dataset_hdf5_g.create_dataset("labels", data=labels)
 
@@ -442,10 +463,10 @@ class UnionDataset(GeneExpressionDataset):
         self._set_attributes(out_fname)
         return self
 
-    def union_from_memory(self,
-                          gene_datasets: List[GeneExpressionDataset],
-                          convert_gene_names=False
-                          ):
+    def _union_combine_memory_into_memory(self,
+                                          gene_datasets: List[GeneExpressionDataset],
+                                          convert_gene_names=False
+                                          ):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Loads the final
         dataset directly into memory.
@@ -454,8 +475,6 @@ class UnionDataset(GeneExpressionDataset):
         """
 
         X = []
-        local_means = []
-        local_vars = []
         batch_indices = []
         labels = []
         cell_types = []
@@ -464,8 +483,6 @@ class UnionDataset(GeneExpressionDataset):
             if convert_gene_names:
                 gene_names = self.convert_gene_names(gene_dataset.gene_names)
             X.append(sp_sparse.csr_matrix(self.map_data(gene_dataset.X, gene_names)))
-            local_means.append(gene_dataset.local_means)
-            local_vars.append(gene_dataset.local_vars)
             batch_indices.append(gene_dataset.batch_indices)
             labels.append(gene_dataset.labels)
             if gene_dataset.cell_types is not None:
@@ -489,25 +506,21 @@ class UnionDataset(GeneExpressionDataset):
                                 gene_names=self.gene_names,
                                 cell_types=cell_types
                                 )
-        self.local_means = np.vstack(local_means)
-        self.local_vars = np.vstack(local_vars)
         self._len = self.X.shape[0]
 
         logger.info(f"Joined {len(gene_datasets)} datasets to one of shape {self._len} x {self.gene_names_len}.")
 
         return self
 
-    def union_into_memory(self,
-                          from_file: bool,
-                          dataset_names=None,
-                          dataset_classes=None,
-                          dataset_args=None,
-                          shared_batches=False
-                          ):
+    def _union_read_dsets_into_memory(self,
+                                      dataset_names=None,
+                                      dataset_classes=None,
+                                      dataset_args=None,
+                                      shared_batches=False
+                                      ):
         """
-        Combines multiple unlabelled gene_datasets based on a mapping of gene names. Loads the final
-        dataset directly into memory.
-        :param from_file: bool, Load the preprocessed data from a file into memory or not.
+        Loads scvi gene_datasets as specified and combines them based on a mapping of gene names.
+        Loads the final dataset into memory.
         :param dataset_names: List, list of names complementing the dataset_classes (needed for some classes)
         :param dataset_classes: List, list of class-initializers of scvi GeneExpression datasets
         :param dataset_args: List, list of further positional arguments for when loading the datasets
@@ -516,67 +529,13 @@ class UnionDataset(GeneExpressionDataset):
         """
 
         X = []
-        local_means = []
-        local_vars = []
         batch_indices = []
         labels = []
 
-        if not from_file:
-            cell_types_map = dict()
-            if dataset_args is None:
-                dataset_args = [None] * len(dataset_names)
-            self._process_by_mp(dataset_names, dataset_classes, dataset_args,
-                                X, local_means, local_vars, batch_indices, labels, cell_types_map,
-                                shared_batches)
-            if not cell_types_map:
-                cell_types = None
-                labels = None
-            else:
-                cell_types = np.unique(np.asarray((x[0] for x in sorted(cell_types_map.items(), key=lambda x: x[1]))))
-                labels = np.concatenate(labels)
-        else:
-            cell_types = []
-            with h5py.File(os.path.join(self.save_path, self.data_fname + ".hdf5"), 'r') as h5_file:
-                for group_name, group in h5_file.items():
-                    X.append(sp_sparse.csr_matrix(self.map_data(group["X"][:], group["gene_names"][:])))
-                    local_means.append(group["local_means"][:])
-                    local_vars.append(group["local_vars"][:])
-                    batch_indices.append(group["batch_indices"][:])
-                    labels.append(group["labels"][:])
-                    if "cell_types" in group:
-                        cell_types.append(group["cell_types"][:])
-                    else:
-                        cell_types.append(np.zeros((len(X[-1])), dtype=str))
-            cell_types = np.sort(np.unique(np.concatenate(cell_types)))
-            cell_types_map = pd.Series(range(1, len(cell_types)+1), index=cell_types)
-            labels = np.concatenate(labels)
+        cell_types_map = dict()
 
-        for i, label in enumerate(labels):
-            if label != 0:
-                cell_type = cell_types[i]
-                if cell_type != "undefined":
-                    labels[i] = cell_types_map[cell_type]
-
-        self.populate_from_data(X=sp_sparse.vstack(X),
-                                batch_indices=np.concatenate(batch_indices),
-                                labels=labels,
-                                gene_names=self.gene_names,
-                                cell_types=cell_types
-                                )
-        self.local_means = np.vstack(local_means)
-        self.local_vars = np.vstack(local_vars)
-        self._len = self.X.shape[0]
-        return self
-
-    def _process_by_mp(self,
-                       dataset_names, dataset_classes, dataset_args,
-                       X,
-                       local_means,
-                       local_vars,
-                       batch_indices,
-                       labels,
-                       cell_types_map,
-                       shared_batches):
+        if dataset_args is None:
+            dataset_args = [None] * len(dataset_names)
 
         _LOCK = Lock()
         cell_types_map_len = 0
@@ -595,12 +554,10 @@ class UnionDataset(GeneExpressionDataset):
                 res = future.result()
                 if res is not None:
                     dataset, _, _ = res
-                    if any(("ENS" not in gn for gn in dataset.gene_names[0:100])):
-                        continue
+
                 _LOCK.acquire()
-                X.append(sp_sparse.csr_matrix(self.map_data(dataset)))
-                local_means.append(dataset.local_means)
-                local_vars.append(dataset.local_vars)
+                gene_names = self.convert_gene_names(dataset.gene_names)
+                X.append(sp_sparse.csr_matrix(self.map_data(dataset.X, gene_names)))
                 bis = dataset.batch_indices
 
                 if bis.sum() == 0:
@@ -618,25 +575,84 @@ class UnionDataset(GeneExpressionDataset):
                     ls = np.zeros((len(dataset))) * np.nan
                 labels.append(ls)
                 _LOCK.release()
+
+        if not cell_types_map:
+            cell_types = None
+            labels = None
+        else:
+            cell_types = np.unique(np.asarray((x[0] for x in sorted(cell_types_map.items(), key=lambda x: x[1]))))
+            labels = np.concatenate(labels)
+
+        for i, label in enumerate(labels):
+            if label != 0:
+                cell_type = cell_types[i]
+                if cell_type != "undefined":
+                    labels[i] = cell_types_map[cell_type]
+
+        self.populate_from_data(X=sp_sparse.vstack(X),
+                                batch_indices=np.concatenate(batch_indices),
+                                labels=labels,
+                                gene_names=self.gene_names,
+                                cell_types=cell_types
+                                )
+        self._len = self.X.shape[0]
+        return self
+
+    def _union_read_hdf5_into_memory(self,
+                                     fname=None):
+        if fname is None:
+            fname = self.data_fname
+
+        X = []
+        batch_indices = []
+        labels = []
+        cell_types = []
+
+        with h5py.File(os.path.join(self.save_path, fname + ".hdf5"), 'r') as h5_file:
+            for group_name, group in h5_file.items():
+                X.append(sp_sparse.csr_matrix(self.map_data(group["X"][:], group["gene_names"][:])))
+                batch_indices.append(group["batch_indices"][:])
+                labels.append(group["labels"][:])
+                if "cell_types" in group:
+                    cell_types.append(group["cell_types"][:])
+                else:
+                    cell_types.append(np.zeros((len(X[-1])), dtype=str))
+        cell_types = np.sort(np.unique(np.concatenate(cell_types)))
+        cell_types_map = pd.Series(range(1, len(cell_types) + 1), index=cell_types)
+        labels = np.concatenate(labels)
+
+        for i, label in enumerate(labels):
+            if label != 0:
+                cell_type = cell_types[i]
+                if cell_type != "undefined":
+                    labels[i] = cell_types_map[cell_type]
+
+        self.populate_from_data(X=sp_sparse.vstack(X),
+                                batch_indices=np.concatenate(batch_indices),
+                                labels=labels,
+                                gene_names=self.gene_names,
+                                cell_types=cell_types
+                                )
+        self._len = self.X.shape[0]
         return
 
-    @property
-    def X(self):
-        return self._X
+    # @property
+    # def X(self):
+    #     return self._X
 
-    @X.setter
-    def X(self, X: Union[np.ndarray, sp_sparse.csr_matrix]):
-        """Sets the data attribute ``X`` and (re)computes the library size."""
-        n_dim = len(X.shape)
-        if n_dim != 2:
-            raise ValueError(
-                "Gene expression data should be 2-dimensional not {}-dimensional.".format(
-                    n_dim
-                )
-            )
-        self._X = X
-        if hasattr(X, "shape"):
-            self._len = X.shape[0]
+    # @X.setter
+    # def X(self, X: Union[np.ndarray, sp_sparse.csr_matrix]):
+    #     """Sets the data attribute ``X`` and (re)computes the library size."""
+    #     n_dim = len(X.shape)
+    #     if n_dim != 2:
+    #         raise ValueError(
+    #             "Gene expression data should be 2-dimensional not {}-dimensional.".format(
+    #                 n_dim
+    #             )
+    #         )
+    #     self._X = X
+    #     if hasattr(X, "shape"):
+    #         self._len = X.shape[0]
 
     @property
     def nb_genes(self) -> int:

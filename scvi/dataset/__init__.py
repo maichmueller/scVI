@@ -27,6 +27,7 @@ from scvi.dataset.synthetic import (
 )
 from scvi.dataset.union import UnionDataset
 from scvi.dataset.ebidata import EbiData
+from scvi.dataset.mouseatlas import MouseAtlas
 
 
 
