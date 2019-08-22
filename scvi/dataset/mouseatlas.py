@@ -24,7 +24,7 @@ class MouseAtlas(DownloadableDataset):
                 + file for file in ('cds_cleaned.RDS', 'cell_annotate.csv', 'gene_annotate.csv')]
             filenames = ["cleaned_data.rds",
                          "gene_annotation.csv",
-                         "celltype_annotation.csv"]
+                         "cell_annotation.csv"]
             super().__init__(save_path=save_path, urls=urls, filenames=filenames)
             filenames.append("phenotype_annotation.csv")
 
@@ -35,7 +35,7 @@ class MouseAtlas(DownloadableDataset):
                 path = fpath.split("/")[:-1]
                 if path != self.save_path:
                     if ftype == "cell":
-                        file = os.path.join(self.save_path, "celltype_annotation.csv")
+                        file = os.path.join(self.save_path, "cell_annotation.csv")
                         if not os.path.exists(file):
                             os.symlink(fpath, file)
                     elif ftype == "gene":
@@ -58,7 +58,7 @@ class MouseAtlas(DownloadableDataset):
 
             filenames = ["cleaned_data_sparse.npz",
                          "gene_annotation.csv",
-                         "celltype_annotation.csv",
+                         "cell_annotation.csv",
                          "phenotype_annotation.csv"]
         self.filenames = filenames
         self.use_ensembl = use_ensembl_gene_names
@@ -71,7 +71,7 @@ class MouseAtlas(DownloadableDataset):
         data = self._read_data_file(os.path.join(self.save_path, self.filenames[0]))
         gene_annotation = self._read_annotation_file(os.path.join(self.save_path, self.filenames[1]))
         if self.use_ensembl:
-            gene_names = gene_annotation["gene_id"]
+            gene_names = np.array([gn.split('.')[0] for gn in gene_annotation["gene_id"]])
         else:
             gene_names = gene_annotation["gene_short_name"]
         cell_annotation = self._read_annotation_file(os.path.join(self.save_path, self.filenames[2]))
@@ -108,7 +108,7 @@ class MouseAtlas(DownloadableDataset):
                     r, c, d = list(map(int, line))
                     row.append(r), col.append(c), data.append(d)
 
-            sparse_matrix = sparse.csr_matrix((data, (row, col)), shape=shape, dtype=np.int64).transpose()
+            sparse_matrix = sparse.csr_matrix((data, (row, col)), shape=shape, dtype=np.int64).transpose().tocsr()
         else:
             sparse_matrix = sparse.load_npz(fpath)
         return sparse_matrix
@@ -242,5 +242,5 @@ class MouseAtlas(DownloadableDataset):
             row = [ro - (last_iter_last_r + 1) for ro in row]
             sparse_matrix = sparse.vstack([sparse_matrix, sparse.csr_matrix((data, (row, col)),
                                                                             shape=(row[-1] + 1, shape[1]),
-                                                                            dtype=np.int64)]).transpose()
+                                                                            dtype=np.int64)]).transpose().tocsr()
         sparse.save_npz(os.path.join(save_path, "cleaned_data_sparse.npz"), sparse_matrix)

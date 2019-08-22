@@ -3,6 +3,7 @@ from scvi.dataset.anndataset import AnnDatasetFromAnnData
 import scanpy
 from scanpy._settings import ScanpyConfig
 import os.path as path
+import os
 import anndata
 from zipfile import ZipFile
 import pandas as pd
@@ -10,6 +11,8 @@ import urllib
 from urllib.request import urlretrieve, urlopen
 from urllib.error import HTTPError
 from zipfile import ZipFile
+import numpy as np
+from scipy import sparse
 
 from tqdm import tqdm
 
@@ -26,16 +29,12 @@ class EbiData(AnnDatasetFromAnnData):
         settings = ScanpyConfig()
         settings.datasetdir = save_path
         filepath = path.join(save_path, experiment)
-        if path.isdir(filepath):
-            if not path.isfile(path.join(filepath, "experimental_design.tsv"))\
+        if not path.isdir(filepath):
+            os.mkdir(filepath)
+
+        if not path.isfile(path.join(filepath, "experimental_design.tsv")) \
             or not path.isfile(path.join(filepath, "expression_archive.zip")):
-                adata = scanpy.datasets.ebi_expression_atlas(experiment, filter_boring=filter_boring)
-            else:
-                adata, obs = read_archive(filepath)
-                adata.obs[obs.columns] = obs
-                if filter_boring:
-                    adata.obs = _filter_boring(adata.obs)
-        else:
+
             experiment_dir = settings.datasetdir / experiment
             dataset_path = experiment_dir / "{}.h5ad".format(experiment)
             try:
@@ -61,15 +60,18 @@ class EbiData(AnnDatasetFromAnnData):
 
             if filter_boring:
                 adata.obs = _filter_boring(adata.obs)
-
-            adata = scanpy.datasets.ebi_expression_atlas(experiment, filter_boring=filter_boring)
+        else:
+            adata, obs = read_archive(filepath)
+            adata.obs[obs.columns] = obs
+            if filter_boring:
+                adata.obs = _filter_boring(adata.obs)
         # for i, barcode in enumerate(pd.unique(adata.obs["batch_indices"])):
         #     adata.obs["batch_indices"][adata.obs["batch_indices"] == barcode] = i
         super().__init__(adata,
                          cell_types_column_name=cell_types_column_name,
                          batch_indices_column_name=batch_indices_column_name,
                          labels_column_name=labels_column_name)
-
+        self.name = experiment
 
 # incompatability of data reader in original scanpy with mouse dataset. Patching with hotfix
 
@@ -89,7 +91,7 @@ def read_expression_from_archive(archive: ZipFile):
     mtx_rows_info = [i for i in info if i.filename.endswith(".mtx_rows")][0]
     mtx_cols_info = [i for i in info if i.filename.endswith(".mtx_cols")][0]
     with archive.open(mtx_data_info, "r") as f:
-        expr = scanpy.datasets._ebi_expression_atlas.read_mtx_from_stream(f)
+        expr = read_mtx_from_stream(f)
     with archive.open(mtx_rows_info, "r") as f:
         varname = pd.read_csv(f, sep="\t", header=None)[1]
     arch_folder = "/".join(archive.fp.name.split("/")[0:-1])
@@ -192,6 +194,16 @@ def download_experiment(accession,
         )
 
 
-scanpy.datasets._ebi_expression_atlas.read_expression_from_archive = read_expression_from_archive
-
-
+def read_mtx_from_stream(stream):
+    stream.readline()
+    shape_line = stream.readline()
+    shape_line = stream.readline() if shape_line == b"%\n" else shape_line
+    n, m, _ = (int(x) for x in shape_line[:-1].split(b" "))
+    data = pd.read_csv(
+        stream,
+        sep=r"\s+",
+        header=None,
+        dtype={0: np.integer, 1: np.integer, 2: np.float32},
+    )
+    mtx = sparse.csr_matrix((data[2], (data[1] - 1, data[0] - 1)), shape=(m, n))
+    return mtx

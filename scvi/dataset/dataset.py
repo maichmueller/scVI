@@ -67,6 +67,7 @@ class GeneExpressionDataset(Dataset):
         self._X = None
         self._batch_indices = None
         self._labels = None
+        self.name = None
         self.n_batches = None
         self.n_labels = None
         self.gene_names = None
@@ -968,6 +969,7 @@ class GeneExpressionDataset(Dataset):
             :new_n_cells
         ]
         self.update_cells(indices)
+        return indices
 
     def filter_cells_by_attribute(
         self, values_to_keep: Union[List, np.ndarray], on: str = "labels"

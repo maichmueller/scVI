@@ -7,8 +7,8 @@
 import numpy as np
 
 from scvi.dataset import union, GeneExpressionDataset, Dataset10X, UnionDataset, EbiData
-from scvi.inference import UnsupervisedTrainer
-from scvi.models import VAE, SCANVI, VAEC
+from scvi.inference import UnsupervisedTrainer, Posterior
+from scvi.models import VAE, SCANVI, VAEC, log_likelihood
 import matplotlib.pyplot as plt
 import matplotlib
 import torch
@@ -30,7 +30,6 @@ def time_dec(func):
 
 
 def train_vae(dataset, save_path, model_savename="vae", use_cuda=True, n_epochs=100, lr=0.01, **kwargs):
-    use_batches = False
     use_cuda = use_cuda and torch.cuda.is_available()
     vae = VAE(dataset.nb_genes)
     trainer = UnsupervisedTrainer(
@@ -46,9 +45,11 @@ def train_vae(dataset, save_path, model_savename="vae", use_cuda=True, n_epochs=
     )
     matplotlib.use("TkAgg")
     if os.path.isfile(f'{save_path}/{model_savename}.pkl'):
+        print("Loading model from file. No training.")
         trainer.model.load_state_dict(torch.load(f'{save_path}/{model_savename}.pkl'))
         trainer.model.eval()
     else:
+        print("Initializing training.")
         trainer.train(n_epochs=n_epochs, lr=lr)
         torch.save(trainer.model.state_dict(), f'{save_path}/{model_savename}.pkl')
     return trainer
@@ -67,12 +68,17 @@ def plot_tsne(trainer, model, dataset, model_savename, n_samples_tsne=5000, colo
     return posterior
 
 
+def compute_log_likelihood(vae: VAE, posterior: Posterior, n_samples_mc: int = 100):
+    llkl = log_likelihood.compute_marginal_log_likelihood(vae, posterior, n_samples_mc)
+    return llkl
+
+
 if __name__ == '__main__':
 
     np.random.seed(1)
     data_full = EbiData("./data", experiment="E-ENAD-15")
-    data_big = UnionDataset("./data", map_fname="ensembl_mouse_genes-proteincoding", low_memory=False)
-    data_big._union_from_memory_to_memory([data_full])
+    data_big = UnionDataset("./data", gene_map_load_filename="ensembl_mouse_genes-proteincoding", low_memory=False)
+    data_big.join_datasets(data_source="memory", data_target="memory", gene_datasets=[data_full])
     data_big.filter_cell_types(np.array([ct for ct in data_big.cell_types if ct != "not available"]))
 
     nr_ct = len(data_big.cell_types)

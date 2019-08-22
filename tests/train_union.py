@@ -75,7 +75,7 @@ if __name__ == '__main__':
     # data.build_mapping([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
     # data.concat_union_in_memory([elem[0] for elem in available_datasets], [elem[1] for elem in available_datasets])
     # data = UnionDataset("./data", map_fname="ensembl_human_genes_proteincoding", data_fname="human_data_union")
-    union_data = UnionDataset("./data", map_fname="ensembl_mouse_genes-proteincoding", low_memory=False)
+    union_data = UnionDataset("./data", gene_map_load_filename="ensembl_mouse_genes-proteincoding", low_memory=False)
     data = EbiData("./data", experiment="E-ENAD-15")
     union_data._union_from_memory_to_memory([data])
     train_vae(union_data, save_path="./data", model_savename="ebi_data_vae_full", n_epochs=100)
