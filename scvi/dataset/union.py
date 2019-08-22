@@ -95,8 +95,8 @@ class UnionDataset(GeneExpressionDataset):
                 h5_acc_dict[ds_specifier].append(index)
             for ds_specifier, ds_indices in h5_acc_dict.items():
                 for attr, dtype in attributes_and_types.items():
-                    elems = getattr(self, attr)[ds_indices]
                     if attr == "X":
+                        elems = list(getattr(self, attr)[ds_indices])
                         elems = np.vstack(elems).astype(dtype)
                         col_indices, map_gene_ind = self.dataset_to_genes_mapping_cached[ds_specifier]
                         elems = self._map_data(elems,
@@ -105,6 +105,7 @@ class UnionDataset(GeneExpressionDataset):
                                                )
                         batch[attr].append(elems)
                     else:
+                        elems = getattr(self, attr)[ds_indices]
                         batch[attr].append(np.asarray(elems).astype(dtype))
 
             batch_out = []
@@ -189,13 +190,18 @@ class UnionDataset(GeneExpressionDataset):
         self.local_vars = np.zeros((self.nb_cells, 1))
         for i_batch in range(self.n_batches):
             idx_batch = np.squeeze(self.batch_indices == i_batch)
-            self.local_means[idx_batch], self.local_vars[idx_batch] = compute_library_size(self.X[idx_batch])
+            self.local_means[idx_batch], \
+            self.local_vars[idx_batch] = self._compute_library_size(self.X[idx_batch])
         self.cell_attribute_names.update(["local_means", "local_vars"])
 
-    def _compute_local_mean(self, data):
-
-
-    def _compute_local_var(self):
+    def _compute_library_size(self, data):
+        _means, _vars = [], []
+        for cell_expression in data:
+            sum_counts = cell_expression.sum()
+            log_counts = np.log(sum_counts)
+            _means.append(np.mean(log_counts).astype(np.float32)).reshape(-1, 1)
+            _vars.append(np.var(log_counts).astype(np.float32)).reshape(-1, 1)
+        return np.array(_means), np.array(_vars)
 
     def change_memory_setting(self,
                               low_memory):
@@ -205,7 +211,7 @@ class UnionDataset(GeneExpressionDataset):
         self.data_load_filename = filename
 
     def _set_attributes(self, data_fname) -> UnionDataset:
-        self.hdf5_filepath = os.path.join(self.save_path, data_fname + ".hdf5")
+        self.hdf5_filepath = os.path.join(self.save_path, data_fname + ".h5")
         self._fill_index_map()
         self._cache_gene_mapping()
         # get the info for all shapes of the datasets
@@ -364,7 +370,7 @@ class UnionDataset(GeneExpressionDataset):
 
     def _write_dset_to_hdf5(self, fname, dataset, dataset_class, dataset_fname):
         string_dt = h5py.special_dtype(vlen=str)
-        with h5py.File(os.path.join(self.save_path, fname + ".hdf5"), 'a') as hdf:
+        with h5py.File(os.path.join(self.save_path, fname + ".h5"), 'a') as hdf:
             dataset_class_str = re.search(class_re_pattern, str(dataset_class)).group()
 
             # grab the necessary data parts:
@@ -421,7 +427,7 @@ class UnionDataset(GeneExpressionDataset):
                                      gene_datasets: List[GeneExpressionDataset],
                                      ):
 
-        with h5py.File(os.path.join(self.save_path, out_fname + ".hdf5"), 'w') as _:
+        with h5py.File(os.path.join(self.save_path, out_fname + ".h5"), 'w') as _:
             # just opening the file overwrite any existing content and enabling append mode for subfunction
             pass
 
@@ -447,7 +453,7 @@ class UnionDataset(GeneExpressionDataset):
         if out_fname is None:
             out_fname = self.data_save_filename
 
-        with h5py.File(os.path.join(self.save_path, out_fname + ".hdf5"), 'w') as _:
+        with h5py.File(os.path.join(self.save_path, out_fname + ".h5"), 'w') as _:
             # just opening the file overwrite any existing content and enabling append mode for subfunction
             pass
 
@@ -471,7 +477,7 @@ class UnionDataset(GeneExpressionDataset):
                 lock.acquire()
                 self._write_dset_to_hdf5(out_fname, dataset, dataset_class, dataset_fname)
                 lock.release()
-        print(f"conversion completed to file '{out_fname}.hdf5'")
+        print(f"conversion completed to file '{out_fname}.h5'")
         self._set_attributes(out_fname)
         return self
 
@@ -517,6 +523,9 @@ class UnionDataset(GeneExpressionDataset):
         logger.info(f"Joined {len(gene_datasets)} datasets to one of shape {self._len} x {self.gene_names_len}.")
 
         return self
+
+    def _union_drop_self_into_hdf5(self, out_fname):
+        self._union_drop_memory_into_hdf5(out_fname=out_fname, gene_datasets=[self])
 
     def _union_read_dsets_into_memory(self,
                                       dataset_names=None,
@@ -616,7 +625,7 @@ class UnionDataset(GeneExpressionDataset):
         labels = []
         cell_types = []
 
-        with h5py.File(os.path.join(self.save_path, fname + ".hdf5"), 'r') as h5_file:
+        with h5py.File(os.path.join(self.save_path, fname + ".h5"), 'r') as h5_file:
             for group_name, group in h5_file.items():
                 X.append(sp_sparse.csr_matrix(self._map_data(group["X"][:], group["gene_names"][:])))
                 batch_indices.append(group["batch_indices"][:])

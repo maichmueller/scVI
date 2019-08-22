@@ -147,7 +147,7 @@ class HDF5Dataset(data.Dataset):
 
 def convert_to_hdf5(dataset_fnames_classes, save_path, out_fname):
     used_datasets = []
-    with h5py.File(f'{save_path}/{out_fname}.hdf5', 'w') as hdf:
+    with h5py.File(f'{save_path}/{out_fname}.h5', 'w') as hdf:
         for dataset_fname, dataset_class in dataset_fnames_classes:
             if dataset_fname is None:
                 dataset = dataset_class(save_path=save_path)
@@ -216,7 +216,7 @@ def convert_to_hdf5(dataset_fnames_classes, save_path, out_fname):
                                                                 dtype=h5py.special_dtype(vlen=str))
                 cell_types_hdf5[:] = cell_types
 
-    print(f"conversion completed to file '{out_fname}.hdf5'")
+    print(f"conversion completed to file '{out_fname}.h5'")
 
 
 
