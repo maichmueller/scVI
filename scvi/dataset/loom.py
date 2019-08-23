@@ -68,58 +68,57 @@ class LoomDataset(DownloadableDataset):
             global_attributes_dict,
         ) = (None, None, None, None, None, None, None)
 
-        ds = loompy.connect(os.path.join(self.save_path, self.filenames[0]))
-        select = ds[:, :].sum(axis=0) > 0  # Take out cells that don't express any gene
-        if not all(select):
-            logger.warning("Removing non-expressing cells")
+        with loompy.connect(os.path.join(self.save_path, self.filenames[0])) as ds:
+            select = ds[:, :].sum(axis=0) > 0  # Take out cells that don't express any gene
+            if not all(select):
+                logger.warning("Removing non-expressing cells")
 
-        for row_attribute_name in ds.ra:
-            if row_attribute_name == self.gene_names_attribute_name:
-                gene_names = ds.ra[self.gene_names_attribute_name]
-            else:
-                gene_attributes_dict = (
-                    gene_attributes_dict if gene_attributes_dict is not None else {}
-                )
-                gene_attributes_dict[row_attribute_name] = ds.ra[row_attribute_name]
+            for row_attribute_name in ds.ra:
+                if row_attribute_name == self.gene_names_attribute_name:
+                    gene_names = ds.ra[self.gene_names_attribute_name]
+                else:
+                    gene_attributes_dict = (
+                        gene_attributes_dict if gene_attributes_dict is not None else {}
+                    )
+                    gene_attributes_dict[row_attribute_name] = ds.ra[row_attribute_name]
 
-        for column_attribute_name in ds.ca:
-            if column_attribute_name == self.batch_indices_attribute_name:
-                batch_indices = ds.ca[self.batch_indices_attribute_name][select]
-            elif column_attribute_name == self.labels_attribute_name:
-                labels = ds.ca[self.labels_attribute_name][select]
-            else:
-                cell_attributes_dict = (
-                    cell_attributes_dict if cell_attributes_dict is not None else {}
-                )
-                cell_attributes_dict[column_attribute_name] = ds.ca[
-                    column_attribute_name
-                ][select]
+            for column_attribute_name in ds.ca:
+                if column_attribute_name == self.batch_indices_attribute_name:
+                    batch_indices = ds.ca[self.batch_indices_attribute_name][select]
+                elif column_attribute_name == self.labels_attribute_name:
+                    labels = ds.ca[self.labels_attribute_name][select]
+                else:
+                    cell_attributes_dict = (
+                        cell_attributes_dict if cell_attributes_dict is not None else {}
+                    )
+                    cell_attributes_dict[column_attribute_name] = ds.ca[
+                        column_attribute_name
+                    ][select]
 
-        for global_attribute_name in ds.attrs:
-            if global_attribute_name == self.cell_types_attribute_name:
-                cell_types = ds.attrs[self.cell_types_attribute_name]
-            else:
-                global_attributes_dict = (
-                    global_attributes_dict if global_attributes_dict is not None else {}
-                )
-                global_attributes_dict[global_attribute_name] = ds.attrs[
-                    global_attribute_name
-                ]
+            for global_attribute_name in ds.attrs:
+                if global_attribute_name == self.cell_types_attribute_name:
+                    cell_types = ds.attrs[self.cell_types_attribute_name]
+                else:
+                    global_attributes_dict = (
+                        global_attributes_dict if global_attributes_dict is not None else {}
+                    )
+                    global_attributes_dict[global_attribute_name] = ds.attrs[
+                        global_attribute_name
+                    ]
 
-        if global_attributes_dict is not None:
-            self.global_attributes_dict = global_attributes_dict
+            if global_attributes_dict is not None:
+                self.global_attributes_dict = global_attributes_dict
 
-        if (
-            self.encode_labels_name_into_int
-            and labels is not None
-            and cell_types is not None
-        ):
-            mapping = dict((v, k) for k, v in enumerate(cell_types))
-            mapper = np.vectorize(lambda x: mapping[x])
-            labels = mapper(labels)
+            if (
+                self.encode_labels_name_into_int
+                and labels is not None
+                and cell_types is not None
+            ):
+                mapping = dict((v, k) for k, v in enumerate(cell_types))
+                mapper = np.vectorize(lambda x: mapping[x])
+                labels = mapper(labels)
 
-        data = ds[:, select].T  # change matrix to cells by genes
-        ds.close()
+            data = ds[:, select].T  # change matrix to cells by genes
 
         logger.info("Finished preprocessing dataset")
         self.populate_from_data(

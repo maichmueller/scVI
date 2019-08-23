@@ -28,6 +28,8 @@ class EbiData(AnnDatasetFromAnnData):
                  labels_column_name=""):
         settings = ScanpyConfig()
         settings.datasetdir = save_path
+        if not path.isdir(save_path):
+            os.mkdir(save_path)
         filepath = path.join(save_path, experiment)
         if not path.isdir(filepath):
             os.mkdir(filepath)

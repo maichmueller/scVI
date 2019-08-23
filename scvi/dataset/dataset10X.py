@@ -144,7 +144,7 @@ class Dataset10X(DownloadableDataset):
             save_path=save_path,
             delayed_populating=delayed_populating,
         )
-        self.name = filename
+        self.name = dataset_name
 
     def populate(self):
         logger.info("Preprocessing dataset")
