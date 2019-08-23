@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import logsumexp
 from torch.distributions import Normal
+from tqdm import tqdm
 
 
 def compute_elbo(vae, posterior, **kwargs):
@@ -19,7 +20,10 @@ def compute_elbo(vae, posterior, **kwargs):
     """
     # Iterate once over the posterior and compute the elbo
     elbo = 0
-    for i_batch, tensors in enumerate(posterior):
+
+    posterior_iter = tqdm(posterior, total=len(posterior.data_loader))
+    posterior_iter.set_description("Computing ELBO for posterior")
+    for i_batch, tensors in enumerate(posterior_iter):
         sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors[
             :5
         ]  # general fish case
@@ -34,6 +38,7 @@ def compute_elbo(vae, posterior, **kwargs):
         elbo += torch.sum(reconst_loss + kl_divergence).item()
     n_samples = len(posterior.indices)
     return elbo / n_samples
+
 
 
 def compute_reconstruction_error(vae, posterior, **kwargs):

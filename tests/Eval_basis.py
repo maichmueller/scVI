@@ -36,7 +36,7 @@ def train_vae(dataset, save_path, model_savename="vae", use_cuda=True, n_epochs=
         vae,
         dataset,
         data_loader_kwargs={
-            "batch_size": 256,
+            "batch_size": 2048,
             "pin_memory": use_cuda
         },
         train_size=0.75,
