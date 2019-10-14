@@ -72,9 +72,9 @@ class AnnDatasetFromAnnData(GeneExpressionDataset):
             batch_indices = ad.obs["batch_indices"].values
 
         if "cell_types" in ad.obs.columns:
-            cell_types = ad.obs["cell_types"]
+            cell_types = ad.obs["cell_types"].astype(str)
             labels = cell_types.values
-            cell_types = cell_types.drop_duplicates().values.astype(str)
+            cell_types = cell_types.drop_duplicates().values
             labels, _ = remap_categories(labels, mapping_from=cell_types)
             # labels = cell_types.rank(method="dense").astype("int")
             # labels.index = cell_types.values

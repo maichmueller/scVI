@@ -910,6 +910,7 @@ class Posterior:
         batch_indices=None,
         labels=None,
         n_batch=None,
+        hide_legend=False,
         max_nr_labels=100,
         dpi=600,
         image_datatype="png",
@@ -961,8 +962,9 @@ class Posterior:
                     #     plt.scatter(
                     #         latent[indices == i, 0], latent[indices == i, 1], c=color, **kwargs
                     #     )
-                lgd = plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
-                                 fancybox=True, shadow=True, ncol=4)
+                if not hide_legend:
+                    lgd = plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
+                                     fancybox=True, shadow=True, ncol=4)
             elif color_by == "batches and labels":
                 fig, axes = plt.subplots(1, 2, figsize=(14, 7))
                 batch_indices = batch_indices.ravel()
@@ -989,7 +991,8 @@ class Posterior:
                     )
                 axes[1].set_title("label coloring")
                 axes[1].axis("off")
-                axes[1].legend()
+                if not hide_legend:
+                    axes[1].legend()
         plt.axis("off")
         plt.tight_layout()
         if save_name:

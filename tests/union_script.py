@@ -5,6 +5,7 @@ import os
 import pandas as pd
 from Eval_basis import *
 
+
 def load_mouse_data():
     conv = pd.read_csv("./data/gene_maps/hugo_mouse_genes-proteincoding.csv", header=0, index_col=0)
     conv.index = conv.index.str.lower()
@@ -19,7 +20,7 @@ def load_mouse_data():
 
         dset = AnnDatasetFromAnnData(dset)
 
-        gns_conved = conv.reindex(np.char.lower(dset.gene_names))["ensembl"]
+        gns_conved = conv.reindex(np.char.upper(dset.gene_names))["ensembl"]
         if not isinstance(dset.X, np.ndarray):
             X = dset.X.toarray()
         else:

@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch import logsumexp
 from torch.distributions import Normal
-from tqdm import tqdm
 
 
 def compute_elbo(vae, posterior, **kwargs):
@@ -21,9 +20,7 @@ def compute_elbo(vae, posterior, **kwargs):
     # Iterate once over the posterior and compute the elbo
     elbo = 0
 
-    posterior_iter = tqdm(posterior, total=len(posterior.data_loader))
-    posterior_iter.set_description("Computing ELBO for posterior")
-    for i_batch, tensors in enumerate(posterior_iter):
+    for i_batch, tensors in enumerate(posterior):
         sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors[
             :5
         ]  # general fish case
@@ -81,44 +78,45 @@ def compute_marginal_log_likelihood(vae, posterior, n_samples_mc=100):
     """
     # Uses MC sampling to compute a tighter lower bound on log p(x)
     log_lkl = 0
-    for i_batch, tensors in enumerate(posterior):
-        sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors
-        to_sum = torch.zeros(sample_batch.size()[0], n_samples_mc)
+    with torch.no_grad():
+        for i_batch, tensors in enumerate(posterior):
 
-        for i in range(n_samples_mc):
+            sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors
+            to_sum = torch.zeros(sample_batch.size()[0], n_samples_mc).cpu()
 
-            # Distribution parameters and sampled variables
-            outputs = vae.inference(sample_batch, batch_index, labels)
-            px_r = outputs["px_r"]
-            px_rate = outputs["px_rate"]
-            px_dropout = outputs["px_dropout"]
-            qz_m = outputs["qz_m"]
-            qz_v = outputs["qz_v"]
-            z = outputs["z"]
-            ql_m = outputs["ql_m"]
-            ql_v = outputs["ql_v"]
-            library = outputs["library"]
+            for i in range(n_samples_mc):
+                # Distribution parameters and sampled variables
+                outputs = vae.inference(sample_batch, batch_index, labels)
+                px_r = outputs["px_r"]
+                px_rate = outputs["px_rate"]
+                px_dropout = outputs["px_dropout"]
+                qz_m = outputs["qz_m"]
+                qz_v = outputs["qz_v"]
+                z = outputs["z"]
+                ql_m = outputs["ql_m"]
+                ql_v = outputs["ql_v"]
+                library = outputs["library"]
 
-            # Reconstruction Loss
-            reconst_loss = vae.get_reconstruction_loss(
-                sample_batch, px_rate, px_r, px_dropout
-            )
+                # Reconstruction Loss
+                reconst_loss = vae.get_reconstruction_loss(
+                    sample_batch, px_rate, px_r, px_dropout
+                )
 
-            # Log-probabilities
-            p_l = Normal(local_l_mean, local_l_var.sqrt()).log_prob(library).sum(dim=-1)
-            p_z = (
-                Normal(torch.zeros_like(qz_m), torch.ones_like(qz_v))
-                .log_prob(z)
-                .sum(dim=-1)
-            )
-            p_x_zl = -reconst_loss
-            q_z_x = Normal(qz_m, qz_v.sqrt()).log_prob(z).sum(dim=-1)
-            q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
+                # Log-probabilities
+                p_l = Normal(local_l_mean, local_l_var.sqrt()).log_prob(library).sum(dim=-1)
+                p_z = (
+                    Normal(torch.zeros_like(qz_m), torch.ones_like(qz_v))
+                    .log_prob(z)
+                    .sum(dim=-1)
+                )
+                p_x_zl = -reconst_loss
+                q_z_x = Normal(qz_m, qz_v.sqrt()).log_prob(z).sum(dim=-1)
+                q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
 
-            to_sum[:, i] = p_z + p_l + p_x_zl - q_z_x - q_l_x
+                to_sum[:, i] = (p_z + p_l + p_x_zl - q_z_x - q_l_x).cpu()
 
-        batch_log_lkl = logsumexp(to_sum, dim=-1) - np.log(n_samples_mc)
-        log_lkl += torch.sum(batch_log_lkl).item()
+            batch_log_lkl = logsumexp(to_sum, dim=-1) - np.log(n_samples_mc)
+            log_lkl += torch.sum(batch_log_lkl).item()
 
     n_samples = len(posterior.indices)
     # The minus sign is there because we actually look at the negative log likelihood
