@@ -72,8 +72,14 @@ class VAE(nn.Module):
             self.px_r = torch.nn.Parameter(torch.randn(n_input, n_batch))
         elif self.dispersion == "gene-label":
             self.px_r = torch.nn.Parameter(torch.randn(n_input, n_labels))
-        else:  # gene-cell
+        elif self.dispersion == "gene-cell":
             pass
+        else:
+            raise ValueError(
+                "dispersion must be one of ['gene', 'gene-batch',"
+                " 'gene-label', 'gene-cell'], but input was "
+                "{}.format(self.dispersion)"
+            )
 
         # z encoder goes from the n_input-dimensional data to an n_latent-d
         # latent space representation
@@ -169,9 +175,9 @@ class VAE(nn.Module):
     def get_reconstruction_loss(self, x, px_rate, px_r, px_dropout):
         # Reconstruction Loss
         if self.reconstruction_loss == "zinb":
-            reconst_loss = -log_zinb_positive(x, px_rate, px_r, px_dropout)
+            reconst_loss = -log_zinb_positive(x, px_rate, px_r, px_dropout).sum(dim=-1)
         elif self.reconstruction_loss == "nb":
-            reconst_loss = -log_nb_positive(x, px_rate, px_r)
+            reconst_loss = -log_nb_positive(x, px_rate, px_r).sum(dim=-1)
         return reconst_loss
 
     def scale_from_z(self, sample_batch, fixed_batch):

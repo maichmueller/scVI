@@ -2,7 +2,7 @@
 scVI
 ====
 
-|PyPI| |bioconda| |Docs| |Build Status| |Coverage| |Code Style|
+|PyPI| |bioconda| |Docs| |Build Status| |Coverage| |Code Style| |Downloads|
 
 .. |PyPI| image:: https://img.shields.io/pypi/v/scVI.svg
     :target: https://pypi.org/project/scvi
@@ -17,7 +17,8 @@ scVI
     :target: https://codecov.io/gh/YosefLab/scVI
 .. |Code Style| image:: https://img.shields.io/badge/code%20style-black-000000.svg
     :target: https://github.com/python/black
-
+.. |Downloads| image:: https://pepy.tech/badge/scvi
+   :target: https://pepy.tech/project/scvi
 
 Single-cell Variational Inference
 
@@ -28,11 +29,7 @@ Single-cell Variational Inference
 Quick Start
 -----------
 
-0. If you intend to use parallel implementation of our hyperparameter tuning feature, install MongoDb_.
-
-.. _MongoDb: https://docs.mongodb.com/manual/installation/
-
-1. Install Python 3.7. We typically use the Miniconda_ Python distribution.
+1. Install Python 3.7. We typically use the Miniconda_ Python distribution and Linux.
 
 .. _Miniconda: https://conda.io/miniconda.html
 
@@ -45,31 +42,34 @@ Quick Start
     ``conda install scvi -c bioconda -c conda-forge``
 
    Alternatively, you may try pip (``pip install scvi``), or you may clone this repository and run ``python setup.py install``.
-4. Follow along with our Jupyter notebooks to quickly get familiar with scVI!
+
+4. If you wish to use multiple GPUs for hyperparameter tuning, install MongoDb_.
+
+.. _MongoDb: https://docs.mongodb.com/manual/installation/
+
+5. Follow along with our Jupyter notebooks to quickly get familiar with scVI!
 
    a. Getting started:
        * `data loading`__
        * `basic usage`__
    b. Analyzing several datasets:
-       * `harmonization`__
-       * `annotation`__
+       * `harmonization (scVI)`__
+       * `annotation (scANVI)`__
    c. Advanced topics:
        * `interaction with scanpy`__
        * `linear decoder for gene interpretation`__
-       * `reproducing results from the scVI paper`__
        * `imputation of unobserved gene expression (gimVI)`__
-       * `hyperparameter tuning for scVI with our autotune module`__
+       * `automated hyperparameter search`__
 
 
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/data_loading.ipynb
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/basic_tutorial.ipynb
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/harmonization.ipynb
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/annotation.ipynb
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/scanpy_pbmc3k.ipynb
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/linear_decoder.ipynb
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/scVI_reproducibility.ipynb
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/gimvi_tutorial.ipynb
-.. __: https://github.com/YosefLab/scVI/blob/master/tests/notebooks/autotune_advanced_notebook.ipynb
+.. __: https://nbviewer.jupyter.org/github/YosefLab/scVI/blob/master/tests/notebooks/data_loading.ipynb
+.. __: https://nbviewer.jupyter.org/github/YosefLab/scVI/blob/master/tests/notebooks/basic_tutorial.ipynb
+.. __: https://nbviewer.jupyter.org/github/YosefLab/scVI/blob/master/tests/notebooks/harmonization.ipynb
+.. __: https://nbviewer.jupyter.org/github/YosefLab/scVI/blob/master/tests/notebooks/annotation.ipynb
+.. __: https://nbviewer.jupyter.org/github/YosefLab/scVI/blob/master/tests/notebooks/scanpy_pbmc3k.ipynb
+.. __: https://nbviewer.jupyter.org/github/YosefLab/scVI/blob/master/tests/notebooks/linear_decoder.ipynb
+.. __: https://nbviewer.jupyter.org/github/YosefLab/scVI/blob/master/tests/notebooks/gimvi_tutorial.ipynb
+.. __: https://nbviewer.jupyter.org/github/YosefLab/scVI/blob/master/tests/notebooks/autotune_advanced_notebook.ipynb
 
 References
 ----------
