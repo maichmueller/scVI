@@ -1,40 +1,65 @@
 from __future__ import annotations
-import numpy as np
-import pandas as pd
-from datetime import datetime
 import warnings
-from scipy import sparse
-from scvi.dataset import *
 from scvi.dataset.dataset import *
+import pandas as pd
 import torch
-from torch.utils.data import Dataset
 from collections import defaultdict
+
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-from multiprocessing import cpu_count, Pool, Lock, Process, Value
-from functools import wraps
+from multiprocessing import cpu_count, Lock
+
 import sys
-from tqdm.auto import tqdm
 import re
+
+from tqdm.auto import tqdm
 import h5py
 import loompy
-import time
-from typing import Dict, Tuple, Sequence
-from functools import singledispatch
-import itertools
 
+from typing import Dict, Tuple
+
+# this pattern will be used throughout the code to identify simply the scvi dataloader class
+# without the need for the scvi.dataloader prefix when converted to a str.
+# A bit unstable, especially if the str __rep__ of the dataloaders were to change, but that's a future
+# github issue waiting to be solved then.
 class_regex_pattern = r"((?<=[.])[A-Za-z_0-9]+(?='>))|((?<=class ')\w+(?='>))"
 
 
 class UnionDataset(GeneExpressionDataset):
+    """
+    The UnionDataset class aims to provide a fully scVI compatible dataset concatenation API with large data support.
+
+    Among its features are 3 big ones:
+        - Concatenating scVI datasets, preserving cell type labels, batch indices (if so wished), local means and vars,
+          and mapping the datasets onto a common gene map.
+        - Building of a common gene map either by loading it from a csv file of column structure
+          (Genes, PositionalIndex) or by building it from: datasets to load, hdf5 datasets file, loom file.
+        - Supporting out of memory data loading for hdf5 and loom files too big to be loaded into memory. With such it
+          is possible to train on datasets worth multiple hundred gigabytes, albeit the speed of which doesn't convince
+          (Private dataloading benchmark: loom ~400 times slower, hdf5 ~800 times slower than memory).
+    """
+
     def __init__(self,
-                 save_path,
-                 low_memory=True,
-                 ignore_batch_annotation=True,
-                 gene_map_load_filename=None,
-                 gene_map_save_filename=None,
-                 data_load_filename=None,
-                 data_save_filename=None
+                 save_path: str,
+                 low_memory: bool = True,
+                 ignore_batch_annotation: bool = True,
+                 gene_map_load_filename: str = None,
+                 gene_map_save_filename: str = None,
+                 data_load_filename: str = None,
+                 data_save_filename: str = None
                  ):
+        """
+        Setting the most important features of the class on init. These settings can be overwritten after instantiation.
+        :param save_path: str, the path, in which all of the data to load and save is stored and will be stored.
+        :param low_memory: bool, if true the class will load metaloader for the data attribute ``X`` that load data
+        on demand out of memory.
+        :param ignore_batch_annotation: bool (optional), if true, all batch indices are reduced to 0.
+        :param gene_map_load_filename: str (optional), the file, from which to load the gene map
+        :param gene_map_save_filename: str (optional), the file, to which a potentially later built gene map would be
+        saved.
+        :param data_load_filename: str (optional), the file, from which data should be loaded (e.g. h5 file).
+        :param data_save_filename: str (optional), the file, to which concatenated data should be saved. Can be easily
+        changed later, on method call.
+        """
         super().__init__()
         self.save_path = save_path
 
@@ -54,7 +79,7 @@ class UnionDataset(GeneExpressionDataset):
 
         self.ignore_batch_annotation = ignore_batch_annotation
 
-        self.set_gene_map(gene_map_load_filename)
+        self.load_gene_map()
 
         if data_load_filename is not None:
             _, ext = os.path.splitext(data_load_filename)
@@ -68,19 +93,16 @@ class UnionDataset(GeneExpressionDataset):
                 elif ext == ".loom":
                     self._union_from_loom_to_memory(in_filename=data_load_filename, as_sparse=True)
 
-    def __getitem__(self, idx):
-        return idx
-
-    def collate_fn_base(self,
-                        attributes_and_types,
-                        indices
-                        ) -> Tuple[torch.Tensor]:
-        return super().collate_fn_base(attributes_and_types, batch=indices)
-
     def collate_fn_base_h5(self,
                            attributes_and_types,
                            indices
                            ) -> Tuple[torch.Tensor]:
+        """
+        Collate method specialization for loading the data from an hdf5 file.
+        Unlike for the loom collate method, the indices need to be first collected by associated dataset, so that h5py
+        can load all the chosen indices from each dataset at once, instead of lazily iterating over every index and
+        searching for the respective dataset anew every time.
+        """
         indices = np.asarray(indices)
         indices.sort()
         self._cache_gene_mapping()
@@ -115,6 +137,9 @@ class UnionDataset(GeneExpressionDataset):
                              attributes_and_types,
                              indices
                              ) -> Tuple[torch.Tensor]:
+        """
+        Collate function specialization for loading the data from a loom file.
+        """
         indices = np.asarray(indices)
         indices.sort()
 
@@ -126,46 +151,69 @@ class UnionDataset(GeneExpressionDataset):
 
         return tuple(batch)
 
-    def build_mapping(self,
-                      dataset_names,
-                      dataset_classes,
-                      dataset_args=None,
-                      multiprocess=True,
-                      **kwargs
-                      ):
+    def build_gene_map(self,
+                       data_source: str,
+                       **kwargs
+                       ):
+        """
+        Concatenate datasets the way determined in ``data_source`` and ``data_target``. Any combination of the elements
+        mentioned in ``data_source`` and ``data_target`` below are possible to be used.
+        Kwargs needs to fit the combination precisely.
 
-        if self.gene_map is not None:
+        For ``data_source``:
+            - 'memory' will use datasets already loaded into memory.
+            - 'hdf5' will load gene names from the datasets of an hdf5 file.
+            - 'loom' will load the gene names from a dataset in a loom file.
+            - 'scvi' will load datasets using the scvi dataloaders and then take their gene names.
+            - 'self' will simply map the gene names of the currently loaded dataset.
+
+        :param data_source: str, one of "memory", "hdf5", "loom", "self", or "scvi".
+        :param kwargs: the arguments for the chosen combination method.
+        :return: self
+        """
+        if self.gene_map_load_filename is not None:
+            logger.log("Gene map filename found. Loading it instead.")
+            self.set_gene_map(self.gene_map_load_filename)
             return
 
-        if dataset_args is None:
-            dataset_args = [None] * len(dataset_names)
+        if data_source not in ["memory", "hdf5", "loom", "self", "scvi"]:
+            raise ValueError(f"Parameter 'data_source={data_source}' not supported.")
 
-        filtered_classes = defaultdict(list)
-
-        if multiprocess:
-            gene_map = self._build_mapping_mp(dataset_names, dataset_classes, filtered_classes,
-                                              dataset_args=dataset_args, **kwargs)
-        else:
-            gene_map = self._build_mapping_serial(dataset_names, dataset_classes, filtered_classes,
-                                                  dataset_args=dataset_args, **kwargs)
-
-        self.gene_map = pd.Series(list(gene_map.values()), index=list(gene_map.keys()))
-        self.gene_names_len = len(gene_map)
+        gene_map = eval(f"self._build_mapping_from_{data_source}(**kwargs)")
+        self.gene_map = pd.Series(data=list(gene_map.values()), index=list(gene_map.keys()))
+        self.gene_names_len = len(self.gene_map)
         if self.gene_map_save_filename:
             self.gene_map.to_csv(
                 os.path.join(self.save_path, self.gene_map_save_filename + ".csv"),
                 header=False
             )
-            pd.Series(list(filtered_classes.values()), index=list(filtered_classes.keys())).to_csv(
-                os.path.join(self.save_path, self.gene_map_save_filename + "_used_datasets.csv"),
-                header=False
-            )
+        return self
 
     def join_datasets(self,
                       data_source: str,
                       data_target: str,
                       **kwargs):
+        """
+        Concatenate datasets the way determined in ``data_source`` and ``data_target``. Any combination of the elements
+        mentioned in ``data_source`` and ``data_target`` below are possible to be used.
+        Kwargs needs to fit the combination precisely.
 
+        For ``data_source``:
+            - 'memory' will concatenate datasets already loaded into memory.
+            - 'hdf5' will load datasets from a hdf5 file.
+            - 'loom' will load the dataset from a loom file.
+            - 'scvi' will load datasets using the scvi dataloaders.
+            - 'self' will simply map the currently loaded dataset onto the gene map.
+        For ``data_target``:
+            - 'memory' will store the concatenated dataset into memory.
+            - 'hdf5' will save the concatenated dataset into an hdf5 file.
+            - 'loom' will save the concatenated dataset into a loom file.
+
+        :param data_source: str, one of "memory", "hdf5", "loom", "self", or "scvi".
+        :param data_target: str, one of "memory", "hdf5", or "loom"
+        :param kwargs: the arguments for the chosen combination method.
+        :return: self
+        """
         if data_source not in ["memory", "hdf5", "loom", "self", "scvi"]:
             raise ValueError(f"Parameter 'data_source={data_source}' not supported.")
         if data_target not in ["memory", "hdf5", "loom"]:
@@ -174,51 +222,38 @@ class UnionDataset(GeneExpressionDataset):
         eval(f"self._union_from_{data_source}_to_{data_target}(**kwargs)")
         return self
 
-    def compute_library_size_batch(self):
-        """
-        Computes the library size per batch. Overrides base method, because computing library size for data stemming
-        from out of memory is incredibly slow. More a hotfix than a smart solution.
-        """
-        if not self.low_memory:
-            self.local_means = np.zeros((self.nb_cells, 1))
-            self.local_vars = np.zeros((self.nb_cells, 1))
-            for i_batch in range(self.n_batches):
-                idx_batch = np.squeeze(self.batch_indices == i_batch)
-                self.local_means[idx_batch], \
-                self.local_vars[idx_batch] = self._compute_library_size(self.X[idx_batch],
-                                                                        batch_size=len(idx_batch))
-            self.cell_attribute_names.update(["local_means", "local_vars"])
-
-    def _compute_library_size(self, data, batch_size=None):
-        if self.low_memory:
-            logger.warn("Library size computation ignored in low memory mode. "
-                        "Ensure you have loaded the local means and vars!")
-        else:
-            sum_counts = data.sum(axis=1)
-            log_counts = np.log(sum_counts)
-            m = np.mean(log_counts)
-            v = np.var(log_counts)
-
-            return np.array(m).astype(np.float32).reshape(-1, 1), \
-                   np.array(v).reshape(-1, 1).astype(np.float32)
-
-    def set_gene_map(self, filename) -> UnionDataset:
+    def set_gene_map_load_filename(self,
+                                   filename: str = None) -> UnionDataset:
         self.gene_map_load_filename = filename
+        return self
 
+    def load_gene_map(self):
+        """
+        Load the gene map from the file given in gene_map_load_filename.
+        """
         if self.gene_map_load_filename is not None:
             self.gene_map = pd.read_csv(
                 os.path.join(self.save_path, self.gene_map_load_filename + ".csv"),
                 header=0,
                 index_col=0
             ).sort_index()
-            self.gene_map.index = self.gene_map.index.astype(str).str.upper()
-            self.gene_map = pd.Series(range(len(self.gene_map)), index=self.gene_map.index)
+            index = self.gene_map.index.astype(str).str.upper()
+            self.gene_map = pd.Series(range(len(self.gene_map)), index=index)
             self.gene_names = self.gene_map.index.values
             self.gene_names_len = len(self.gene_names)
         return self
 
+    def set_gene_map_save_filename(self,
+                                   filename: bool):
+        self.gene_map_save_filename = filename
+        return self
+
     def set_memory_setting(self,
-                           low_memory) -> UnionDataset:
+                           low_memory: bool) -> UnionDataset:
+        """
+        Set the memory setting of the union object. As a side effect it also sets the appropriate collate method to the
+        one of the datafile in question or to the standard (when the class handles data in memory).
+        """
         if low_memory:
             self.low_memory = True
             filename, ext = os.path.splitext(self.data_load_filename)
@@ -231,12 +266,45 @@ class UnionDataset(GeneExpressionDataset):
             self.collate_fn_base = super(UnionDataset, self).collate_fn_base
         return self
 
-    def set_data_filename(self, filename) -> UnionDataset:
+    def set_data_load_filename(self, filename) -> UnionDataset:
         self.data_load_filename = filename
         return self
 
-    def _set_attributes(self, data_fname) -> UnionDataset:
-        self.data_load_filename = data_fname
+    def set_data_save_filename(self, filename) -> UnionDataset:
+        self.data_save_filename = filename
+        return self
+
+    def set_ignore_batch_annotation(self,
+                                    ignore_batch_annotation: bool):
+        self.ignore_batch_annotation = ignore_batch_annotation
+        return self
+
+    def compute_library_size_batch(self):
+        """
+        Computes the library size per batch. Overrides base method with a method that practically avoids computing the
+        library size for the low memmory setting, because computing library size for data stemming from out of memory is
+        incredibly slow.
+
+        More a hotfix than a smart solution.
+        """
+        if not self.low_memory:
+            self.local_means = np.zeros((self.nb_cells, 1))
+            self.local_vars = np.zeros((self.nb_cells, 1))
+            for i_batch in range(self.n_batches):
+                idx_batch = np.squeeze(self.batch_indices == i_batch)
+                self.local_means[idx_batch], \
+                self.local_vars[idx_batch] = self._compute_library_size(self.X[idx_batch],
+                                                                        batch_size=len(idx_batch))
+            self.cell_attribute_names.update(["local_means", "local_vars"])
+
+    def _set_attributes(self,
+                        data_fname: str = None) -> UnionDataset:
+        """
+        Set the attributes correctly after having concatenated datasets. This sets the data attribute ``X`` depending
+        on the datafile extension, i.e. either the metaloaders for loom or hdf5, if needed.
+        """
+        if data_fname is None:
+            data_fname = self.data_load_filename
         filepath = os.path.join(self.save_path, data_fname)
         filename, ext = os.path.splitext(data_fname)
         self.set_memory_setting(self.low_memory)
@@ -306,7 +374,87 @@ class UnionDataset(GeneExpressionDataset):
 
         return self
 
+    def _build_mapping_from_self(self):
+        return {gene: pos for (gene, pos) in zip(sorted(self.gene_names), range(len(self.gene_names)))}
+
+    def _build_mapping_from_scvi(self,
+                                 dataset_classes: List[GeneExpressionDataset],
+                                 dataset_names: List[str],
+                                 dataset_args: List[any] = None,
+                                 multiprocess: bool = True,
+                                 ):
+        """
+        Build the gene map by loading the datasets specified in the parameters through their respective dataloaders.
+
+        :param dataset_classes: list
+        :param dataset_names: list, strings of the names of the datasets.
+        :param dataset_args: list, list of lists of further keyword arguments to provide for each specific dataloader.
+        :param multiprocess: bool, load the datasets in parallel or serial.
+        :return: dict, the gene map as dictionary with the genes as keys and their positional number as value.
+        """
+        if dataset_args is None:
+            dataset_args = [None] * len(dataset_names)
+
+        total_genes = set()
+
+        def append_genes(dset):
+            nonlocal total_genes
+            if dset.gene_names is None:
+                # without gene names we can't build a proper mapping
+                warnings.warn(
+                    f"Dataset {(ds_class, ds_name)} doesn't have gene_names as attribute. Skipping this dataset.")
+                return
+            total_genes = total_genes.union(dataset.gene_names)
+
+        if not multiprocess:
+            for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args):
+                dataset, _, _ = self._load_dataset(ds_name, ds_class, ds_args)
+                append_genes(dataset)
+        else:
+            with ProcessPoolExecutor(max_workers=min(len(dataset_names), cpu_count() // 2)) as executor:
+                futures = list(
+                    (executor.submit(
+                        self._load_dataset,
+                        ds_name,
+                        ds_class,
+                        ds_args)
+                        for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args))
+                )
+                for future in as_completed(futures):
+                    dataset, ds_class, ds_name = future.result()
+                    append_genes(dataset)
+
+        return {gene: pos for (gene, pos) in zip(sorted(total_genes), range(len(total_genes)))}
+
+    def _compute_library_size(self, data, batch_size=None):
+        if self.low_memory:
+            logger.warn("Library size computation ignored in low memory mode. "
+                        "Ensure you have loaded the local means and vars!")
+        else:
+            sum_counts = data.sum(axis=1)
+            log_counts = np.log(sum_counts)
+            m = np.mean(log_counts)
+            v = np.var(log_counts)
+
+            return np.array(m).astype(np.float32).reshape(-1, 1), \
+                   np.array(v).reshape(-1, 1).astype(np.float32)
+
     def _fill_index_map(self) -> None:
+        """
+        If not already existing, create a mapping of each dataset to an associated index and its inverse.
+
+        This is needed to speed up later access. Its necessity is given by the fact that one wants a simple index
+        structure when accessing via indices, however an hdf5 file with multiple datasets would always first need to
+        know the dataset and then the dataset specific index to access any data.
+
+        In essence, we need a mapping of the kind
+            (Dataset_name: 10x_mouse_10k, index: 216)   ->  (index: 216)
+            (Dataset_name: 10x_mouse_10k, index: 429)   ->  (index: 429)
+            (Dataset_name: smartseq_m_3k, index: 216)   ->  (index: 10216)
+            (Dataset_name: smartseq_m_3k, index: 1659)  ->  (index: 11659)
+
+        and its inverse.
+        """
         if not self.index_to_dataset_map or not self.dataset_to_index_map:
             with h5py.File(os.path.join(self.save_path, self.data_load_filename), "r") as h5_file:
                 # Walk through all groups, extracting datasets
@@ -317,8 +465,24 @@ class UnionDataset(GeneExpressionDataset):
                     self.index_to_dataset_map.extend([(group_name, i) for i in range(shape[0])])
         return
 
-    def _cache_gene_mapping(self, ) -> None:
-        if not self.dataset_to_genes_mapping_cached:
+    def _cache_gene_mapping(self, force_redo: bool = False) -> UnionDataset:
+        """
+        Compute the mapping of the gene names of each dataset inside the hdf5 file for faster data mapping when loading
+        from file later in e.g. training.
+        :param force_redo: bool, if true the cache is recomputed (e.g. for gene_map) change.
+        :return: self.
+        """
+        ext = None
+        if self.data_load_filename is not None:
+            _, ext = os.path.splitext(self.data_load_filename)
+        conditions = \
+            self.low_memory \
+            and ext in [".h5", ".loom"] \
+            and (
+                force_redo
+                or not self.dataset_to_genes_mapping_cached
+            )
+        if conditions:
             self.dataset_to_genes_mapping_cached = dict()
             with h5py.File(os.path.join(self.save_path, self.data_load_filename), "r") as h5_file:
                 # Walk through all groups, extracting datasets
@@ -329,7 +493,33 @@ class UnionDataset(GeneExpressionDataset):
                     col_indices = self.gene_map[mappable_genes].values
                     col_indices.sort()
                     self.dataset_to_genes_mapping_cached[group_name] = (col_indices, mappable_genes_indices.flatten())
-        return
+        return self
+
+    def _load_dataset(self,
+                      ds_class,
+                      ds_name,
+                      ds_args,
+                      ):
+        """
+        Helper method to load datasets from the specified scvi class, name and further arguments.
+        :param ds_class: object, the scvi dataloader provided as callable object.
+        :param ds_name: str, the name of the dataset (can be ``None`` if the dataloader doesn't need it)
+        :param ds_args: list, further kwargs for the dsetloader.
+        :return: tuple, 1 - the dataset; 2 - the dataset class object; 3 - the dataset name
+        """
+        print(f"Loading {ds_class, ds_name}.")
+        if ds_name is not None:
+            if ds_args is not None:
+                dataset = ds_class(ds_name, save_path=self.save_path, **ds_args)
+            else:
+                dataset = ds_class(ds_name, save_path=self.save_path)
+        else:
+            if ds_args is not None:
+                dataset = ds_class(save_path=self.save_path, **ds_args)
+            else:
+                dataset = ds_class(save_path=self.save_path)
+
+        return dataset, ds_class, dataset.name
 
     def _map_data(self,
                   data,
@@ -375,83 +565,63 @@ class UnionDataset(GeneExpressionDataset):
 
         return data_out
 
-    def _load_dataset(self,
-                      ds_name,
-                      ds_class,
-                      ds_args,
-                      check_for_gene_annotation=True
-                      ):
-        print(f"Loading {ds_class, ds_name}.")
-        if ds_name is not None:
-            if ds_args is not None:
-                dataset = ds_class(ds_name, save_path=self.save_path, **ds_args)
-            else:
-                dataset = ds_class(ds_name, save_path=self.save_path)
-        else:
-            if ds_args is not None:
-                dataset = ds_class(save_path=self.save_path, **ds_args)
-            else:
-                dataset = ds_class(save_path=self.save_path)
+    def _build_mapping_from_hdf5(self,
+                                 in_filename: str,
+                                 subselection_datasets: Union[List[str], np.ndarray] = None
+                                 ):
+        """
+        Build the gene map by loading the gene names from a dataset inside an hdf5 file.
+        :param in_filename: str, the name of the hdf5 file.
+        :param subselection_datasets: list or ndarray, if provided, a list of dataset names that are to be considered.
+        :return: dict, the gene map as dictionary with the genes as keys and their positional number as value.
+        """
+        if in_filename is None:
+            in_filename = self.data_load_filename
 
-        if check_for_gene_annotation and dataset.gene_names is None:
-            # without gene names we can't build a proper mapping
-            warnings.warn(
-                f"Dataset {(ds_class, ds_name)} doesn't have gene_names as attribute. Skipping this dataset.")
-            return None
-
-        return dataset, ds_class, dataset.name
-
-    def _build_mapping_serial(self,
-                              dataset_names,
-                              dataset_classes,
-                              filtered_classes,
-                              dataset_args=None,
-                              **kwargs
-                              ):
-        gene_map = dict()
-        gene_names_len = 0
-        for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args):
-            res = self._load_dataset(ds_name, ds_class, ds_args)
-            if res is None:
-                continue
-            dataset = res[0]
-            filtered_classes[re.search(class_regex_pattern, str(ds_class)).group()].append(str(ds_name))
-
-            print("Extending gene list...", end="")
-            sys.stdout.flush()
-            gns = dataset.gene_names
-            for gn in gns:
-                if gn not in self.gene_names:
-                    gene_map[gn] = gene_names_len
-                    gene_names_len += 1
-            print("done!")
-            sys.stdout.flush()
-
-        return gene_map
-
-    def _build_mapping_mp(self,
-                          dataset_names,
-                          dataset_classes,
-                          filtered_classes,
-                          dataset_args=None,
-                          ):
         total_genes = set()
-        with ProcessPoolExecutor(max_workers=min(len(dataset_names), cpu_count() // 2)) as executor:
-            futures = list(
-                (executor.submit(self._load_dataset,
-                                 ds_name,
-                                 ds_class,
-                                 ds_args)
-                 for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args))
-            )
-            for future in as_completed(futures):
-                res = future.result()
-                if res is not None:
-                    total_genes = total_genes.union(res[0].gene_names)
-                    filtered_classes[re.search(class_regex_pattern, str(res[1])).group()].append(res[2])
+        with h5py.File(os.path.join(self.save_path, in_filename), 'r') as h5file:
+            dataset_group = h5file["Datasets"]
+            for dataset_name, dataset_acc in dataset_group.items():
+                if subselection_datasets is not None and dataset_name in subselection_datasets:
+                    total_genes = total_genes.union(dataset_acc["gene_names"][:].astype(str))
+        return {gene: pos for (gene, pos) in zip(sorted(total_genes), range(len(total_genes)))}
 
-        gene_map = {gene: pos for (gene, pos) in zip(total_genes, range(len(total_genes)))}
-        return gene_map
+    def _build_mapping_from_loom(self,
+                                 in_filename: str,
+                                 gene_names_attribute_name: str = "Gene"
+                                 ):
+        """
+        Build the gene map by loading the gene names from a dataset inside a loom file.
+        :param in_filename: str, the name of the loom file.
+        :param gene_names_attribute_name: str, the accessor name of the attribute storing the gene names.
+        :return: dict, the gene map as dictionary with the genes as keys and their positional number as value.
+        """
+        if in_filename is None:
+            in_filename = self.data_load_filename
+
+        total_genes = set()
+        with loompy.connect(os.path.join(self.save_path, in_filename)) as ds:
+            for row_attribute_name in ds.ra:
+                if row_attribute_name == gene_names_attribute_name:
+                    gene_names = np.char.upper(ds.ra[gene_names_attribute_name].astype(str))
+                    total_genes = total_genes.union(gene_names)
+
+        return {gene: pos for (gene, pos) in zip(sorted(total_genes), range(len(total_genes)))}
+
+    @staticmethod
+    def _build_mapping_from_memory(gene_datasets: List[GeneExpressionDataset]
+                                   ):
+        """
+        Build the gene map from datasets already loaded into memory.
+        :param gene_datasets: list, all datasets, that are meant to be used for the gene map.
+        :return: dict, the gene map as dictionary with the genes as keys and their positional number as value.
+        """
+        total_genes = set()
+        for dataset in gene_datasets:
+            gene_names = np.char.upper(dataset.gene_names.astype(str))
+            total_genes = total_genes.union(gene_names)
+
+        return {gene: pos for (gene, pos) in zip(sorted(total_genes), range(len(total_genes)))}
 
     def _write_dset_to_hdf5(self, out_filename, dataset, dataset_class, dataset_fname):
         """
@@ -701,8 +871,8 @@ class UnionDataset(GeneExpressionDataset):
                 (executor.submit(self._load_dataset,
                                  ds_name,
                                  ds_class,
-                                 ds_args,
-                                 True)
+                                 ds_args
+                                 )
                  for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args))
             )
             for future in as_completed(futures):
@@ -816,8 +986,8 @@ class UnionDataset(GeneExpressionDataset):
                 (executor.submit(self._load_dataset,
                                  ds_name,
                                  ds_class,
-                                 ds_args,
-                                 True)
+                                 ds_args
+                                 )
                  for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args))
             )
             for future in as_completed(futures):
