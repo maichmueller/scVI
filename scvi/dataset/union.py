@@ -399,17 +399,17 @@ class UnionDataset(GeneExpressionDataset):
             self.cell_attribute_names.update(["local_means", "local_vars"])
 
     def _set_attributes(self,
-                        data_fname: str = None) -> UnionDataset:
+                        data_filename: str = None) -> UnionDataset:
         """
         Set the attributes correctly after having concatenated datasets. This sets the data attribute ``X`` depending
         on the datafile extension, i.e. either the metaloaders for loom or hdf5, if needed.
         """
-        if data_fname is None:
-            data_fname = self.data_load_filename
+        if data_filename is None:
+            data_filename = self.data_load_filename
         else:
-            self.data_load_filename = data_fname
-        filepath = os.path.join(self.save_path, data_fname)
-        filename, ext = os.path.splitext(data_fname)
+            self.data_load_filename = data_filename
+        filepath = os.path.join(self.save_path, data_filename)
+        filename, ext = os.path.splitext(data_filename)
         self.set_memory_setting(self.low_memory)
         if ext == ".h5":
             self._fill_index_map()
@@ -499,10 +499,10 @@ class UnionDataset(GeneExpressionDataset):
         know the dataset and then the dataset specific index to access any data.
 
         In essence, we need a mapping of the kind
-            (Dataset_name: 10x_mouse_10k, index: 216)   ->  (index: 216)
-            (Dataset_name: 10x_mouse_10k, index: 429)   ->  (index: 429)
-            (Dataset_name: smartseq_m_3k, index: 216)   ->  (index: 10216)
-            (Dataset_name: smartseq_m_3k, index: 1659)  ->  (index: 11659)
+            (Dataset_name: 10x_mouse_10k,  index: 216)   ->  (index: 216)
+            (Dataset_name: 10x_mouse_10k,  index: 429)   ->  (index: 429)
+            (Dataset_name: smartseq_m_3k,  index: 216)   ->  (index: 10216)
+            (Dataset_name: smartseq_m_3k,  index: 1659)  ->  (index: 11659)
 
         and its inverse.
         """
@@ -625,7 +625,7 @@ class UnionDataset(GeneExpressionDataset):
         return {gene: pos for (gene, pos) in zip(sorted(total_genes), range(len(total_genes)))}
 
     def _build_mapping_from_hdf5(self,
-                                 in_filename: str,
+                                 in_filename: str = None,
                                  subselection_datasets: Union[List[str], np.ndarray] = None
                                  ):
         """
@@ -634,8 +634,10 @@ class UnionDataset(GeneExpressionDataset):
         :param subselection_datasets: list or ndarray, if provided, a list of dataset names that are to be considered.
         :return: dict, the gene map as dictionary with the genes as keys and their positional number as value.
         """
-        if in_filename is None:
+        if in_filename is None and self.data_load_filename is not None:
             in_filename = self.data_load_filename
+        else:
+            raise ValueError("No filename to read from provided.")
 
         total_genes = set()
         with h5py.File(os.path.join(self.save_path, in_filename), 'r') as h5file:
@@ -646,7 +648,7 @@ class UnionDataset(GeneExpressionDataset):
         return {gene: pos for (gene, pos) in zip(sorted(total_genes), range(len(total_genes)))}
 
     def _build_mapping_from_loom(self,
-                                 in_filename: str,
+                                 in_filename: str = None,
                                  gene_names_attribute_name: str = "Gene"
                                  ):
         """
@@ -655,8 +657,10 @@ class UnionDataset(GeneExpressionDataset):
         :param gene_names_attribute_name: str, the accessor name of the attribute storing the gene names.
         :return: dict, the gene map as dictionary with the genes as keys and their positional number as value.
         """
-        if in_filename is None:
+        if in_filename is None and self.data_load_filename is not None:
             in_filename = self.data_load_filename
+        else:
+            raise ValueError("No filename to read from provided.")
 
         total_genes = set()
         with loompy.connect(os.path.join(self.save_path, in_filename)) as ds:
@@ -751,16 +755,20 @@ class UnionDataset(GeneExpressionDataset):
                                             data=cell_types.astype(np.dtype("S")), dtype=string_dt)
         return self
 
-    def _write_dset_to_loom(self, dataset_ptr, dataset, dataset_class):
+    def _write_dset_to_loom(self, dataset_ptr, dataset, dataset_name=None, dataset_class=None):
         """
         Method to write a dataset onto an opened loom file.
         :param dataset_ptr: loom file pointer, the reference to the loom file, onto which the dataset should be written.
         :param dataset: GeneExpressionDataset, the dataset to write.
+        :param dataset_name: str, the name of the current dataset to append to the total name
         :param dataset_class: object, the class identifier, that signifies which dataloader this dataset came from.
         :return:
         """
-        dataset_class_str = re.search(class_regex_pattern, str(dataset_class)).group()
-        dataset_ptr.attrs.DatasetName += f"_{dataset_class_str}"
+        if dataset_name is None:
+            dataset_class_str = re.search(class_regex_pattern, str(dataset_class)).group()
+            dataset_ptr.attrs.DatasetName += f"_{dataset_class_str}"
+        else:
+            dataset_ptr.attrs.DatasetName += f"_{dataset_name}"
         # grab the necessary data parts:
         # aside from the data itself (X), the gene_names, local means, local_vars, batch_indices and labels
         # there are no guaranteed attributes of each dataset.
@@ -822,8 +830,8 @@ class UnionDataset(GeneExpressionDataset):
             )
 
     def _union_from_memory_to_hdf5(self,
-                                   out_filename,
                                    gene_datasets: List[GeneExpressionDataset],
+                                   out_filename=None
                                    ):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Stores the final
@@ -832,6 +840,11 @@ class UnionDataset(GeneExpressionDataset):
         :param gene_datasets:  List, list of already loaded datasets of class ``GeneExpressionDataset``.
         :return: self (with instantiated data attributes for data access).
         """
+        if out_filename is None and self.data_save_filename is not None:
+            out_filename = self.data_save_filename
+        else:
+            raise ValueError("No filename to write to provided.")
+
         filename, ext = os.path.splitext(out_filename)
 
         if ext != ".h5":
@@ -861,9 +874,60 @@ class UnionDataset(GeneExpressionDataset):
 
         self._set_attributes(out_filename)
 
+    def _union_from_scvi_to_hdf5(self,
+                                 dataset_names,
+                                 dataset_classes,
+                                 dataset_args=None,
+                                 out_filename=None):
+        """
+        Combines multiple unlabelled gene_datasets based on a mapping of gene names. Stores the final
+        dataset onto a Hdf5 file with filename ``out_filename``.
+        :param dataset_names: List, list of names complementing the dataset_classes (needed for some classes)
+        :param dataset_classes: List, list of class-initializers of scvi GeneExpression datasets
+        :param dataset_args: List, list of further positional arguments for when loading the datasets
+        :param out_filename: str, name of the file to which to write.
+        :return: self (with instantiated data attributes for data access).
+        """
+        if out_filename is None and self.data_save_filename is not None:
+            out_filename = self.data_save_filename
+        else:
+            raise ValueError("No filename to write to provided.")
+
+        _, ext = os.path.splitext(out_filename)
+        if ext != ".h5":
+            logger.warn(f"Chosen file type is 'hdf5', but provided ending is: '{ext}' versus expected ending: '.h5'.")
+
+        with h5py.File(os.path.join(self.save_path, out_filename), 'w') as _:
+            # just opening the file overwrite any existing content and enabling append mode for subfunction
+            pass
+
+        if dataset_args is None:
+            dataset_args = [None] * len(dataset_names)
+        lock = Lock()
+        with ThreadPoolExecutor() as executor:
+            futures = list(
+                (executor.submit(self._load_dataset,
+                                 ds_name,
+                                 ds_class,
+                                 ds_args
+                                 )
+                 for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args))
+            )
+            for future in as_completed(futures):
+                res = future.result()
+                if res is not None:
+                    dataset, dataset_class, dataset_fname = res
+
+                lock.acquire()
+                self._write_dset_to_hdf5(out_filename, dataset, dataset_class, dataset_fname)
+                lock.release()
+        print(f"conversion completed to file '{out_filename}.h5'")
+        self._set_attributes(out_filename)
+        return self
+
     def _union_from_memory_to_loom(self,
-                                   out_filename,
                                    gene_datasets: List[GeneExpressionDataset],
+                                   out_filename=None
                                    ):
         """
         Combines multiple unlabelled gene_datasets based on a mapping of gene names. Stores the final
@@ -872,6 +936,11 @@ class UnionDataset(GeneExpressionDataset):
         :param gene_datasets:  List, list of already loaded datasets of class ``GeneExpressionDataset``.
         :return: self (with instantiated data attributes for data access).
         """
+        if out_filename is None and self.data_save_filename is not None:
+            out_filename = self.data_save_filename
+        else:
+            raise ValueError("No filename to write to provided.")
+
         filename, ext = os.path.splitext(out_filename)
         if ext != ".loom":
             logger.warn(f"Chosen file type is 'loom'. Yet provided ending is: '{ext}' versus expected ending: '.loom'.")
@@ -909,55 +978,6 @@ class UnionDataset(GeneExpressionDataset):
             dsout.attrs.LocalVarCompleteDataset = total_lv
 
         self._set_attributes(out_filename)
-
-    def _union_from_scvi_to_hdf5(self,
-                                 dataset_names,
-                                 dataset_classes,
-                                 dataset_args=None,
-                                 out_filename=None):
-        """
-        Combines multiple unlabelled gene_datasets based on a mapping of gene names. Stores the final
-        dataset onto a Hdf5 file with filename ``out_filename``.
-        :param dataset_names: List, list of names complementing the dataset_classes (needed for some classes)
-        :param dataset_classes: List, list of class-initializers of scvi GeneExpression datasets
-        :param dataset_args: List, list of further positional arguments for when loading the datasets
-        :param out_filename: str, name of the file to which to write.
-        :return: self (with instantiated data attributes for data access).
-        """
-        if out_filename is None:
-            out_filename = self.data_save_filename
-
-        _, ext = os.path.splitext(out_filename)
-        if ext != ".h5":
-            logger.warn(f"Chosen file type is 'hdf5', but provided ending is: '{ext}' versus expected ending: '.h5'.")
-
-        with h5py.File(os.path.join(self.save_path, out_filename), 'w') as _:
-            # just opening the file overwrite any existing content and enabling append mode for subfunction
-            pass
-
-        if dataset_args is None:
-            dataset_args = [None] * len(dataset_names)
-        lock = Lock()
-        with ThreadPoolExecutor() as executor:
-            futures = list(
-                (executor.submit(self._load_dataset,
-                                 ds_name,
-                                 ds_class,
-                                 ds_args
-                                 )
-                 for ds_name, ds_class, ds_args in zip(dataset_names, dataset_classes, dataset_args))
-            )
-            for future in as_completed(futures):
-                res = future.result()
-                if res is not None:
-                    dataset, dataset_class, dataset_fname = res
-
-                lock.acquire()
-                self._write_dset_to_hdf5(out_filename, dataset, dataset_class, dataset_fname)
-                lock.release()
-        print(f"conversion completed to file '{out_filename}.h5'")
-        self._set_attributes(out_filename)
-        return self
 
     def _union_from_memory_to_memory(self,
                                      gene_datasets: List[GeneExpressionDataset],
@@ -1010,7 +1030,7 @@ class UnionDataset(GeneExpressionDataset):
         logger.info(f"Joined {len(gene_datasets)} datasets to one of shape {self.nb_cells} x {self.gene_names_len}.")
         return self
 
-    def _union_from_self_to_h5(self, out_filename):
+    def _union_from_self_to_hdf5(self, out_filename):
         """
         Simplifier for when one wants to write the loaded data to a hdf5 file.
         :param out_filename: str, the filename of the hdf5 file to write.
@@ -1122,10 +1142,12 @@ class UnionDataset(GeneExpressionDataset):
 
         return self
 
-    def _union_from_h5_to_memory(self,
-                                 in_filename=None):
-        if in_filename is None:
+    def _union_from_hdf5_to_memory(self,
+                                   in_filename=None):
+        if in_filename is None and self.data_load_filename is not None:
             in_filename = self.data_load_filename
+        else:
+            raise ValueError("No filename to read from provided.")
 
         X = []
         batch_indices = []
@@ -1173,6 +1195,72 @@ class UnionDataset(GeneExpressionDataset):
                                 )
         return
 
+    def _union_from_hdf5_to_loom(self,
+                                 in_filename=None,
+                                 out_filename=None,
+                                 shared_batches=False):
+        if in_filename is None and self.data_load_filename is not None:
+            in_filename = self.data_load_filename
+        else:
+            raise ValueError("No filename to read from provided.")
+        if out_filename is None and self.data_save_filename is not None:
+            out_filename = self.data_save_filename
+        else:
+            raise ValueError("No filename to write to provided.")
+
+        labels = []
+        cell_types = set('undefined')
+
+        with h5py.File(os.path.join(self.save_path, in_filename), 'r') as h5file, \
+            loompy.connect(os.path.join(self.save_path, in_filename)) as ds:
+
+            dataset_group = h5file["Datasets"]
+            for group_name, group in dataset_group.items():
+                if "cell_types" in group:
+                    cts = group["cell_types"][:]
+                    labels.append(cts[group["labels"][:]])
+                    cell_types = cell_types.union(cts)
+                else:
+                    labels.append(np.repeat("undefined", group["X"].shape[0]))
+
+            labels = np.concatenate(labels)
+            if (labels != 'undefined').all():
+                cell_types.remove("undefined")
+
+            cell_types = sorted(cell_types)
+            labels, _ = remap_categories(labels, mapping_from=cell_types)
+
+            start_idx = 0
+            n_batch_offset = 0
+            for group_name, group in dataset_group.items():
+                X = sp_sparse.csr_matrix(
+                    self.map_data(
+                        group["X"][:],
+                        np.char.upper(group["gene_names"][:].astype(str))
+                    )
+                )
+                lbs = labels[start_idx:start_idx + len(X)]
+                local_means = group["local_means"][:]
+                local_vars = group["local_vars"][:]
+                batch_indices = group["batch_indices"][:]
+                if not shared_batches:
+                    batch_indices += n_batch_offset
+                    n_batch_offset = batch_indices.max() + 1
+
+                start_idx = start_idx + len(X)
+
+                self.populate_from_data(X=X,
+                                        batch_indices=batch_indices,
+                                        labels=lbs,
+                                        gene_names=self.gene_names,
+                                        cell_types=cell_types,
+                                        local_means=local_means,
+                                        local_vars=local_vars
+                                        )
+                self._write_dset_to_loom(ds, self, dataset_name=group_name)
+        self._set_attributes(in_filename)
+        return
+
     def _union_from_loom_to_memory(self,
                                    in_filename=None,
                                    as_sparse=True,
@@ -1207,8 +1295,10 @@ class UnionDataset(GeneExpressionDataset):
         :param dataset_name_attribute_name: str, the identifier for the dataset name attribute within the loom file.
         :return: self.
         """
-        if in_filename is None:
+        if in_filename is None and self.data_load_filename is not None:
             in_filename = self.data_load_filename
+        else:
+            raise ValueError("No filename to read from provided.")
 
         batch_indices = None
         labels = None
@@ -1284,6 +1374,135 @@ class UnionDataset(GeneExpressionDataset):
                                 local_means=np.repeat(local_means, X.shape[0], axis=0),
                                 local_vars=np.repeat(local_vars, X.shape[0], axis=0),
                                 name=name)
+        return self
+
+    def _union_from_loom_to_hdf5(self,
+                                 in_filename=None,
+                                 out_filename=None,
+                                 as_sparse=True,
+                                 gene_names_attribute_name="Gene",
+                                 batch_indices_attribute_name="BatchID",
+                                 local_means_attribute_name="LocalMeans",
+                                 local_vars_attribute_name="LocalVars",
+                                 labels_attribute_name="ClusterID",
+                                 cell_types_attribute_name="CellTypes",
+                                 total_local_mean_attribute_name="LocalMeanCompleteDataset",
+                                 total_local_var_attribute_name="LocalVarCompleteDataset",
+                                 dataset_name_attribute_name="DatasetName"):
+        """
+        Loads a loom file completely into memory. If ``as_sparse`` is true, the data will be loaded into a scipy sparse
+        matrix, otherwise a dense numpy array.
+
+        The loading code has been taken mostly from the loom dataloader class in ``loom.py``.
+
+        :param in_filename: str, filename of the loom file.
+        :param as_sparse: bool, flag whether to use sparse matrices or numpy arrays.
+        :param gene_names_attribute_name: str, the identifier for the gene names attribute within the loom file.
+        :param batch_indices_attribute_name: str, the identifier for the batch indices attribute within the loom file.
+        :param local_means_attribute_name: str, the identifier for the local means attribute within the loom file.
+        :param local_vars_attribute_name: str, the identifier for the local vars attribute within the loom file.
+        :param labels_attribute_name: str, the identifier for the label attribute within the loom file.
+        :param cell_types_attribute_name: str, the identifier for the cell types attribute within the loom file.
+        :param total_local_mean_attribute_name: str, the identifier for the attribute within the loom file. This is the
+        attribute, which stores the local_mean of each data entry, if all of the data were to be seen as from a single
+        batch. Needed for when batch annotation is ignored.
+        :param total_local_var_attribute_name: str, the identifier for the local var attribute within the loom file, if
+        the dataset ignores batch indices (see @total_local_mean).
+        :param dataset_name_attribute_name: str, the identifier for the dataset name attribute within the loom file.
+        :return: self.
+        """
+        if in_filename is None and self.data_load_filename is not None:
+            in_filename = self.data_load_filename
+        else:
+            raise ValueError("No filename to read from provided.")
+        if out_filename is None and self.data_save_filename is not None:
+            out_filename = self.data_save_filename
+        else:
+            raise ValueError("No filename to save to provided.")
+
+        batch_indices = None
+        labels = None
+        cell_types = None
+        gene_names = None
+        local_means = None
+        local_vars = None
+        name = None
+
+        string_dt = h5py.special_dtype(vlen=str)
+
+        with loompy.connect(os.path.join(self.save_path, in_filename)) as ds, \
+            h5py.File(os.path.join(self.save_path, out_filename), 'w') as h5file:
+            h5file.create_group("Datasets")
+            h5file.create_group("Metadata")
+            data_group = h5file["Datasets"]
+            try:
+                name = ds.attrs[dataset_name_attribute_name].astype(str)
+            except KeyError as e:
+                name = "UNKNOWN_NAME"
+            dataset_group = data_group.create_group(name)
+            ds_out = dataset_group.create_dataset("X",
+                                                  shape=(ds.shape[1], ds.shape[0]),
+                                                  compression="lzf",
+                                                  dtype=np.float32)
+
+            for row_attribute_name in ds.ra:
+                if row_attribute_name == gene_names_attribute_name:
+                    gene_names = np.char.upper(ds.ra[gene_names_attribute_name].astype(str))
+                else:
+                    gene_attributes_dict = (
+                        gene_attributes_dict if gene_attributes_dict is not None else {}
+                    )
+                    gene_attributes_dict[row_attribute_name] = ds.ra[row_attribute_name]
+
+            for column_attribute_name in ds.ca:
+                if column_attribute_name == batch_indices_attribute_name:
+                    batch_indices = ds.ca[batch_indices_attribute_name][:].astype(int)
+                elif column_attribute_name == labels_attribute_name:
+                    labels = ds.ca[labels_attribute_name][:].astype(int)
+                elif column_attribute_name == local_means_attribute_name:
+                    if not self.ignore_batch_annotation:
+                        local_means = ds.ca[local_means_attribute_name]
+                elif column_attribute_name == local_vars_attribute_name:
+                    if not self.ignore_batch_annotation:
+                        local_vars = ds.ca[local_vars_attribute_name]
+                else:
+                    cell_attributes_dict = (
+                        cell_attributes_dict if cell_attributes_dict is not None else {}
+                    )
+                    cell_attributes_dict[column_attribute_name] = ds.ca[column_attribute_name][:]
+
+            global_attributes_dict = None
+            for global_attribute_name in ds.attrs:
+                if global_attribute_name == cell_types_attribute_name:
+                    cell_types = ds.attrs[cell_types_attribute_name].astype(str)
+                elif global_attribute_name == total_local_mean_attribute_name:
+                    if self.ignore_batch_annotation:
+                        local_means = ds.attrs[total_local_mean_attribute_name]
+                elif global_attribute_name == total_local_var_attribute_name:
+                    if self.ignore_batch_annotation:
+                        local_vars = ds.attrs[total_local_var_attribute_name]
+                else:
+                    global_attributes_dict = (
+                        global_attributes_dict if global_attributes_dict is not None else {}
+                    )
+                    global_attributes_dict[global_attribute_name] = ds.attrs[global_attribute_name]
+
+            dataset_group.create_dataset("gene_names", data=gene_names.astype(np.dtype("S")), dtype=string_dt)
+            dataset_group.create_dataset("local_means", data=local_means)
+            dataset_group.create_dataset("local_vars", data=local_vars)
+            dataset_group.create_dataset("batch_indices", data=batch_indices)
+            dataset_group.create_dataset("labels", data=labels)
+            dataset_group.create_dataset("cell_types",
+                                         data=cell_types.astype(np.dtype("S")), dtype=string_dt)
+
+            if global_attributes_dict is not None:
+                self.global_attributes_dict = global_attributes_dict
+
+            shape = ds.shape
+            nr_rows = 5000
+            for i in tqdm(range(0, shape[1], nr_rows), desc="Loading from loom and writing to hdf5 iteratively"):
+                ds_out[i:i + nr_rows, :] = ds[:, i:i + nr_rows].toarray().astype(np.float32).T
+
         return self
 
     def populate_from_data(
