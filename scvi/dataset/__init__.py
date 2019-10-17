@@ -18,6 +18,7 @@ from scvi.dataset.loom import (
 )
 from scvi.dataset.pbmc import PbmcDataset, PurifiedPBMCDataset
 from scvi.dataset.seqfish import SeqfishDataset
+from scvi.dataset.seqfishplus import SeqFishPlusDataset
 from scvi.dataset.smfish import SmfishDataset
 from scvi.dataset.synthetic import (
     SyntheticDataset,
@@ -28,6 +29,7 @@ from scvi.dataset.synthetic import (
 from scvi.dataset.union import UnionDataset
 from scvi.dataset.ebidata import EbiData
 from scvi.dataset.mouseatlas import MouseAtlas
+
 
 
 
@@ -54,6 +56,7 @@ __all__ = [
     "PbmcDataset",
     "PurifiedPBMCDataset",
     "SeqfishDataset",
+    "SeqFishPlusDataset",
     "SmfishDataset",
     "SyntheticDataset",
     "SyntheticRandomDataset",

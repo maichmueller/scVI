@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch import logsumexp
 from torch.distributions import Normal
-from tqdm import tqdm
 
 
 def compute_elbo(vae, posterior, **kwargs):
@@ -21,9 +20,7 @@ def compute_elbo(vae, posterior, **kwargs):
     # Iterate once over the posterior and compute the elbo
     elbo = 0
 
-    posterior_iter = tqdm(posterior, total=len(posterior.data_loader))
-    posterior_iter.set_description("Computing ELBO for posterior")
-    for i_batch, tensors in enumerate(posterior_iter):
+    for i_batch, tensors in enumerate(posterior):
         sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors[
             :5
         ]  # general fish case
@@ -81,11 +78,11 @@ def compute_marginal_log_likelihood(vae, posterior, n_samples_mc=100):
     """
     # Uses MC sampling to compute a tighter lower bound on log p(x)
     log_lkl = 0
-    for i_batch, tensors in enumerate(posterior):
-        sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors
-        to_sum = torch.zeros(sample_batch.size()[0], n_samples_mc)
+    with torch.no_grad():
+        for i_batch, tensors in enumerate(posterior):
 
-        for i in range(n_samples_mc):
+            sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors
+            to_sum = torch.zeros(sample_batch.size()[0], n_samples_mc).cpu()
 
             # Distribution parameters and sampled variables
             outputs = vae.inference(sample_batch, batch_index, labels)
@@ -115,10 +112,10 @@ def compute_marginal_log_likelihood(vae, posterior, n_samples_mc=100):
             q_z_x = Normal(qz_m, qz_v.sqrt()).log_prob(z).sum(dim=-1)
             q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
 
-            to_sum[:, i] = p_z + p_l + p_x_zl - q_z_x - q_l_x
+                to_sum[:, i] = (p_z + p_l + p_x_zl - q_z_x - q_l_x).cpu()
 
-        batch_log_lkl = logsumexp(to_sum, dim=-1) - np.log(n_samples_mc)
-        log_lkl += torch.sum(batch_log_lkl).item()
+            batch_log_lkl = logsumexp(to_sum, dim=-1) - np.log(n_samples_mc)
+            log_lkl += torch.sum(batch_log_lkl).item()
 
     n_samples = len(posterior.indices)
     # The minus sign is there because we actually look at the negative log likelihood
@@ -165,7 +162,7 @@ def log_zinb_positive(x, mu, theta, pi, eps=1e-8):
 
     res = mul_case_zero + mul_case_non_zero
 
-    return torch.sum(res, dim=-1)
+    return res
 
 
 def log_nb_positive(x, mu, theta, eps=1e-8):
@@ -193,4 +190,60 @@ def log_nb_positive(x, mu, theta, eps=1e-8):
         - torch.lgamma(x + 1)
     )
 
-    return torch.sum(res, dim=-1)
+    return res
+
+
+def log_mixture_nb(x, mu_1, mu_2, theta_1, theta_2, pi, eps=1e-8):
+    """
+    Note: All inputs should be torch Tensors
+    log likelihood (scalar) of a minibatch according to a mixture nb model.
+    pi is the probability to be in the first component.
+
+    For totalVI, the first component should be background.
+
+    Variables:
+    mu1: mean of the first negative binomial component (has to be positive support) (shape: minibatch x genes)
+    theta1: first inverse dispersion parameter (has to be positive support) (shape: minibatch x genes)
+    mu2: mean of the second negative binomial (has to be positive support) (shape: minibatch x genes)
+    theta2: second inverse dispersion parameter (has to be positive support) (shape: minibatch x genes)
+        If None, assume one shared inverse dispersion parameter.
+    eps: numerical stability constant
+    """
+    if theta_2 is not None:
+        log_nb_1 = log_nb_positive(x, mu_1, theta_1)
+        log_nb_2 = log_nb_positive(x, mu_2, theta_2)
+    # this is intended to reduce repeated computations
+    else:
+        theta = theta_1
+        if theta.ndimension() == 1:
+            theta = theta.view(
+                1, theta.size(0)
+            )  # In this case, we reshape theta for broadcasting
+
+        log_theta_mu_1_eps = torch.log(theta + mu_1 + eps)
+        log_theta_mu_2_eps = torch.log(theta + mu_2 + eps)
+        lgamma_x_theta = torch.lgamma(x + theta)
+        lgamma_theta = torch.lgamma(theta)
+        lgamma_x_plus_1 = torch.lgamma(x + 1)
+
+        log_nb_1 = (
+            theta * (torch.log(theta + eps) - log_theta_mu_1_eps)
+            + x * (torch.log(mu_1 + eps) - log_theta_mu_1_eps)
+            + lgamma_x_theta
+            - lgamma_theta
+            - lgamma_x_plus_1
+        )
+        log_nb_2 = (
+            theta * (torch.log(theta + eps) - log_theta_mu_2_eps)
+            + x * (torch.log(mu_2 + eps) - log_theta_mu_2_eps)
+            + lgamma_x_theta
+            - lgamma_theta
+            - lgamma_x_plus_1
+        )
+
+    logsumexp = torch.logsumexp(torch.stack((log_nb_1, log_nb_2 - pi)), dim=0)
+    softplus_pi = F.softplus(-pi)
+
+    log_mixture_nb = logsumexp - softplus_pi
+
+    return log_mixture_nb

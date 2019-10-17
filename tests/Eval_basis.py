@@ -55,21 +55,26 @@ def train_vae(dataset, save_path, model_savename="vae", use_cuda=True, n_epochs=
     return trainer
 
 
-def plot_tsne(trainer, model, dataset, model_savename, n_samples_tsne=5000, colors=None, **kwargs):
+def plot_tsne(trainer, model, dataset, image_savename, n_samples_tsne=5000, colors=None, **kwargs):
     plt.style.use("ggplot")
     posterior = trainer.create_posterior(model, dataset, indices=np.arange(len(dataset)))
     posterior.show_t_sne(n_samples=n_samples_tsne,
                          labels=dataset.labels,
                          color_by='labels',
                          colormap=colors,
-                         save_name=f"{model_savename}_tsne.png",
+                         save_name=image_savename,
                          **kwargs)
     plt.show()
     return posterior
 
 
-def compute_log_likelihood(vae: VAE, posterior: Posterior, n_samples_mc: int = 100):
-    llkl = log_likelihood.compute_marginal_log_likelihood(vae, posterior, n_samples_mc)
+def compute_log_likelihood(dataset, save_path, model_savename, data_for_loglikelihood, n_samples_mc: int = 100,
+                           n_epochs=100, lr=0.01, **kwargs):
+    trainer = train_vae(dataset, save_path, model_savename=model_savename, use_cuda=True,
+                        n_epochs=n_epochs, lr=lr, **kwargs)
+    posterior = trainer.create_posterior(trainer.model, data_for_loglikelihood,
+                                         indices=np.arange(len(data_for_loglikelihood)))
+    llkl = log_likelihood.compute_marginal_log_likelihood(trainer.model, posterior, n_samples_mc)
     return llkl
 
 

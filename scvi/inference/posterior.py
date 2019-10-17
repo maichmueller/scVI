@@ -683,8 +683,8 @@ class Posterior:
                 [1, 2, 0]
             )  # Shape : (n_cells_batch, n_genes, n_samples)
 
-            x_old.append(sample_batch)
-            x_new.append(gene_expressions)
+            x_old.append(sample_batch.cpu())
+            x_new.append(gene_expressions.cpu())
 
         x_old = torch.cat(x_old)  # Shape (n_cells, n_genes)
         x_new = torch.cat(x_new)  # Shape (n_cells, n_genes, n_samples)
@@ -692,7 +692,7 @@ class Posterior:
             gene_ids = self.gene_dataset.genes_to_index(genes)
             x_new = x_new[:, gene_ids, :]
             x_old = x_old[:, gene_ids]
-        return x_new.cpu().numpy(), x_old.cpu().numpy()
+        return x_new.numpy(), x_old.numpy()
 
     @torch.no_grad()
     def generate_parameters(self):
@@ -910,6 +910,7 @@ class Posterior:
         batch_indices=None,
         labels=None,
         n_batch=None,
+        hide_legend=False,
         max_nr_labels=100,
         dpi=600,
         image_datatype="png",
@@ -961,8 +962,9 @@ class Posterior:
                     #     plt.scatter(
                     #         latent[indices == i, 0], latent[indices == i, 1], c=color, **kwargs
                     #     )
-                lgd = plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
-                                 fancybox=True, shadow=True, ncol=4)
+                if not hide_legend:
+                    lgd = plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
+                                     fancybox=True, shadow=True, ncol=4)
             elif color_by == "batches and labels":
                 fig, axes = plt.subplots(1, 2, figsize=(14, 7))
                 batch_indices = batch_indices.ravel()
@@ -989,7 +991,8 @@ class Posterior:
                     )
                 axes[1].set_title("label coloring")
                 axes[1].axis("off")
-                axes[1].legend()
+                if not hide_legend:
+                    axes[1].legend()
         plt.axis("off")
         plt.tight_layout()
         if save_name:
