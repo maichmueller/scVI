@@ -149,6 +149,42 @@ class TestUnionDataset(TestCase):
                 os.remove(os.path.join(union.save_path, "test_concat.loom"))
             raise e
 
+    def test_concatenate_from_hdf5_to_memory(self):
+        try:
+            dset1, dset2 = create_datasets()
+
+            union = UnionDataset(save_path="../data",
+                                 low_memory=True,
+                                 ignore_batch_annotation=False)
+            union.build_gene_map(data_source="memory", gene_datasets=[dset1, dset2])
+            union.join_datasets(data_source='memory',
+                                data_target='loom',
+                                gene_datasets=[dset1, dset2],
+                                out_filename="test_concat.loom")
+
+            union_mem = UnionDataset(save_path="../data",
+                                     low_memory=False,
+                                     ignore_batch_annotation=False)
+            union_mem.build_gene_map(data_source="memory",
+                                     gene_datasets=[dset1, dset2])
+            union_mem.join_datasets(data_source="hdf5",
+                                    data_target="memory",
+                                    in_filename="")
+
+            self.assertTrue(len(union) == len(union_mem))
+            random_indices = np.sort(np.random.choice(np.arange(len(union)), size=int(len(union) / 5), replace=False))
+            self.assertTrue((union.X[random_indices] == union_mem.X[random_indices]).all())
+
+            self.assertTrue((union.gene_names == union_mem.gene_names).all())
+            self.assertTrue((union.cell_types == union_mem.cell_types).all())
+            self.assertTrue((union.batch_indices == union_mem.batch_indices).all())
+            self.assertTrue((union.labels == union_mem.labels).all())
+
+        except Exception as e:
+            if os.path.exists(os.path.join(union.save_path, "test_concat.loom")):
+                os.remove(os.path.join(union.save_path, "test_concat.loom"))
+            raise e
+
 
 if __name__ == '__main__':
     unittest.main()
