@@ -21,8 +21,11 @@ class SyntheticDataset(GeneExpressionDataset):
         n_proteins: int = 100,
         n_batches: int = 2,
         n_labels: int = 3,
+        seed: int = None,
     ):
         super().__init__()
+        if seed is not None:
+            np.random.seed(seed)
         # Generating samples according to a ZINB process
         data = np.random.negative_binomial(
             5, 0.3, size=(n_batches, batch_size, nb_genes)

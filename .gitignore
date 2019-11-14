@@ -50,6 +50,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 tests/data/*
+tests/dataset/*
 tests/plots/*
 tests/trained_models/*
 ./tests/data
