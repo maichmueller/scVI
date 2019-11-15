@@ -1,25 +1,40 @@
-from scvi.dataset import UnionDataset, GeneExpressionDataset, SyntheticDataset
+import torch
+
+from scvi.dataset import UnionDataset, GeneExpressionDataset, SyntheticDataset, Dataset10X
 import numpy as np
+from numpy.random import RandomState
 import pandas as pd
 import os
 import copy
 import unittest
 from unittest import TestCase
+# from .utils import unsupervised_training_one_epoch
+from scvi.inference import UnsupervisedTrainer
+from scvi.models import VAE
+
+
+use_cuda = torch.cuda.is_available()
+
+
+def unsupervised_training_one_epoch(dataset: GeneExpressionDataset):
+    vae = VAE(dataset.nb_genes, dataset.n_batches, dataset.n_labels)
+    trainer = UnsupervisedTrainer(vae, dataset, train_size=0.5, use_cuda=use_cuda)
+    trainer.train(n_epochs=1)
 
 
 def create_datasets():
-    np.random.seed(0)
-    data_a = np.sort(np.random.normal(0, 10, 500)).astype(int).reshape(100, 5)
+    rs = RandomState(0)
+    data_a = np.sort(rs.normal(0, 10, 500)).astype(int).reshape(100, 5)
     gene_names_a = list("ABCDE")
     cell_types_a = ["alpha", "beta", "gamma", "delta"]
-    labels_a = np.random.choice(np.arange(len(cell_types_a)), data_a.shape[0])
+    labels_a = rs.choice(np.arange(len(cell_types_a)), data_a.shape[0])
     batch_indices_a = np.random.choice(np.arange(5), size=data_a.shape[0])
 
-    data_b = np.sort(np.random.normal(100, 10, 300)).astype(int).reshape(100, 3)
+    data_b = np.sort(rs.normal(100, 10, 300)).astype(int).reshape(100, 3)
     gene_names_b = list("BFA")
     cell_types_b = ["alpha", "epsilon", "rho"]
-    labels_b = np.random.choice(np.arange(len(cell_types_b)), data_b.shape[0])
-    batch_indices_b = np.random.choice(np.arange(5), size=data_b.shape[0])
+    labels_b = rs.choice(np.arange(len(cell_types_b)), data_b.shape[0])
+    batch_indices_b = rs.choice(np.arange(5), size=data_b.shape[0])
 
     dataset_a = GeneExpressionDataset()
     dataset_b = GeneExpressionDataset()
@@ -85,6 +100,8 @@ class TestUnionDataset(TestCase):
         self.assertTrue((union.batch_indices == expected_batch_indices).all())
         self.assertTrue((union.labels == expected_labels).all())
 
+        unsupervised_training_one_epoch(union)
+
     def test_concatenate_from_memory_to_hdf5(self):
         try:
             dset1, dset2 = copy.deepcopy(dataset1), copy.deepcopy(dataset2)
@@ -109,12 +126,15 @@ class TestUnionDataset(TestCase):
 
             self.assertTrue(len(union) == len(union_mem))
             random_indices = np.sort(np.random.choice(np.arange(len(union)), size=int(len(union) / 5), replace=False))
-            self.assertTrue((union.X[random_indices] == union_mem.X[random_indices]).all())
+
+            self.assertTrue((union.X[random_indices] == union_mem.X[random_indices].toarray()).all())
 
             self.assertTrue((union.gene_names == union_mem.gene_names).all())
             self.assertTrue((union.cell_types == union_mem.cell_types).all())
             self.assertTrue((union.batch_indices == union_mem.batch_indices).all())
             self.assertTrue((union.labels == union_mem.labels).all())
+
+            unsupervised_training_one_epoch(union)
 
         except Exception as e:
             if os.path.exists(os.path.join(save_path, "test_concat.h5")):
@@ -157,6 +177,8 @@ class TestUnionDataset(TestCase):
             self.assertTrue((union.cell_types == union_mem.cell_types).all())
             self.assertTrue((union.batch_indices == union_mem.batch_indices).all())
             self.assertTrue((union.labels == union_mem.labels).all())
+
+            unsupervised_training_one_epoch(union)
 
         except Exception as e:
             if os.path.exists(os.path.join(save_path, "test_concat.loom")):
@@ -208,6 +230,8 @@ class TestUnionDataset(TestCase):
             self.assertTrue((union_from_h5_to_mem.cell_types == union_from_mem_to_mem.cell_types).all())
             self.assertTrue((union_from_h5_to_mem.batch_indices == union_from_mem_to_mem.batch_indices).all())
             self.assertTrue((union_from_h5_to_mem.labels == union_from_mem_to_mem.labels).all())
+
+            unsupervised_training_one_epoch(union_from_h5_to_mem)
 
         except Exception as e:
             if os.path.exists(os.path.join(save_path, "test_concat.h5")):
@@ -261,6 +285,8 @@ class TestUnionDataset(TestCase):
             self.assertTrue((union_from_h5_to_loom.cell_types == union_from_mem_to_mem.cell_types).all())
             self.assertTrue((union_from_h5_to_loom.batch_indices == union_from_mem_to_mem.batch_indices).all())
             self.assertTrue((union_from_h5_to_loom.labels == union_from_mem_to_mem.labels).all())
+
+            unsupervised_training_one_epoch(union_from_h5_to_loom)
 
         except Exception as e:
             if os.path.exists(os.path.join(save_path, "test_concat.h5")):
@@ -319,6 +345,8 @@ class TestUnionDataset(TestCase):
             self.assertTrue((union_from_loom_to_memory.batch_indices == union_from_mem_to_mem.batch_indices).all())
             self.assertTrue((union_from_loom_to_memory.labels == union_from_mem_to_mem.labels).all())
 
+            unsupervised_training_one_epoch(union_from_loom_to_memory)
+
         except Exception as e:
             if os.path.exists(os.path.join(save_path, "test_concat.loom")):
                 os.remove(os.path.join(save_path, "test_concat.loom"))
@@ -375,6 +403,8 @@ class TestUnionDataset(TestCase):
             self.assertTrue((union_from_loom_to_hdf5.batch_indices == union_from_mem_to_mem.batch_indices).all())
             self.assertTrue((union_from_loom_to_hdf5.labels == union_from_mem_to_mem.labels).all())
 
+            unsupervised_training_one_epoch(union_from_loom_to_hdf5)
+
         except Exception as e:
             if os.path.exists(os.path.join(save_path, "test_concat.loom")):
                 os.remove(os.path.join(save_path, "test_concat.loom"))
@@ -382,19 +412,22 @@ class TestUnionDataset(TestCase):
 
     def test_concatenate_from_scvi_to_memory(self):
         random_seed = 0
-
-        dset1, dset2 = (SyntheticDataset(batch_size=10,
-                                         nb_genes=4,
-                                         n_proteins=4,
-                                         n_batches=4,
-                                         n_labels=3,
-                                         seed=random_seed),
-                        SyntheticDataset(batch_size=30,
-                                         nb_genes=2,
-                                         n_proteins=6,
-                                         n_batches=2,
-                                         n_labels=4,
-                                         seed=random_seed))
+        dset1_args = {"batch_size": 10,
+                      "nb_genes": 4,
+                      "n_proteins": 4,
+                      "n_batches": 4,
+                      "n_labels": 3,
+                      "seed": random_seed}
+        dset2_args = {"batch_size": 30,
+                      "nb_genes": 2,
+                      "n_proteins": 6,
+                      "n_batches": 2,
+                      "n_labels": 4,
+                      "seed": random_seed}
+        dset1, dset2 = (
+            SyntheticDataset(**dset1_args),
+            SyntheticDataset(**dset2_args)
+        )
 
         # Concatenate the datasets in memory first as reference
         union_from_mem_to_mem = UnionDataset(save_path=save_path,
@@ -405,6 +438,14 @@ class TestUnionDataset(TestCase):
                                             data_target='memory',
                                             gene_datasets=[dset1, dset2])
 
+        union_from_mem_to_mem_perturb = UnionDataset(save_path=save_path,
+                                                     low_memory=True,
+                                                     ignore_batch_annotation=False)
+        union_from_mem_to_mem_perturb.build_genemap(data_source="memory", gene_datasets=[dset1, dset2])
+        union_from_mem_to_mem_perturb.join_datasets(data_source='memory',
+                                                    data_target='memory',
+                                                    gene_datasets=[dset2, dset1])
+
         # Load datasets from scvi and concatenate them in memory
         union_from_scvi_to_memory = UnionDataset(save_path=save_path,
                                                  low_memory=True,
@@ -414,18 +455,7 @@ class TestUnionDataset(TestCase):
         union_from_scvi_to_memory.join_datasets(data_source='scvi',
                                                 data_target='memory',
                                                 dataset_classes=[SyntheticDataset, SyntheticDataset],
-                                                dataset_args=[{"batch_size": 10,
-                                                               "nb_genes": 4,
-                                                               "n_proteins": 4,
-                                                               "n_batches": 4,
-                                                               "n_labels": 3,
-                                                               "seed": random_seed},
-                                                              {"batch_size": 30,
-                                                               "nb_genes": 2,
-                                                               "n_proteins": 6,
-                                                               "n_batches": 2,
-                                                               "n_labels": 4,
-                                                               "seed": random_seed}]
+                                                dataset_args=[dset1_args, dset2_args]
                                                 )
 
         self.assertTrue(len(union_from_scvi_to_memory) == (len(dset1) + len(dset2)))
@@ -440,28 +470,52 @@ class TestUnionDataset(TestCase):
             (
                 union_from_scvi_to_memory.X[random_indices].toarray() ==
                 union_from_mem_to_mem.X[random_indices].toarray()
+            ).all() or (
+                union_from_scvi_to_memory.X[random_indices].toarray() ==
+                union_from_mem_to_mem_perturb.X[random_indices].toarray()
             ).all()
         )
 
         self.assertTrue((union_from_scvi_to_memory.gene_names == union_from_mem_to_mem.gene_names).all())
         self.assertTrue((union_from_scvi_to_memory.cell_types == union_from_mem_to_mem.cell_types).all())
-        self.assertTrue((union_from_scvi_to_memory.batch_indices == union_from_mem_to_mem.batch_indices).all())
-        self.assertTrue((union_from_scvi_to_memory.labels == union_from_mem_to_mem.labels).all())
+        self.assertTrue(
+            (union_from_scvi_to_memory.batch_indices ==
+             union_from_mem_to_mem.batch_indices
+             ).all() or (
+                union_from_scvi_to_memory.batch_indices ==
+                union_from_mem_to_mem_perturb.batch_indices
+            ).all()
+        )
+        self.assertTrue(
+            (union_from_scvi_to_memory.labels ==
+             union_from_mem_to_mem.labels
+             ).all() or (
+                union_from_scvi_to_memory.labels ==
+                union_from_mem_to_mem_perturb.labels
+            ).all()
+        )
+
+        unsupervised_training_one_epoch(union_from_scvi_to_memory)
 
     def test_concatenate_from_scvi_to_hdf5(self):
         try:
-            dset1, dset2 = (SyntheticDataset(batch_size=10,
-                                             nb_genes=4,
-                                             n_proteins=4,
-                                             n_batches=4,
-                                             n_labels=3,
-                                             seed=0),
-                            SyntheticDataset(batch_size=30,
-                                             nb_genes=2,
-                                             n_proteins=6,
-                                             n_batches=2,
-                                             n_labels=4,
-                                             seed=0))
+            random_seed = 0
+            dset1_args = {"batch_size": 10,
+                          "nb_genes": 4,
+                          "n_proteins": 4,
+                          "n_batches": 4,
+                          "n_labels": 3,
+                          "seed": random_seed}
+            dset2_args = {"batch_size": 30,
+                          "nb_genes": 2,
+                          "n_proteins": 6,
+                          "n_batches": 2,
+                          "n_labels": 4,
+                          "seed": random_seed}
+            dset1, dset2 = (
+                SyntheticDataset(**dset1_args),
+                SyntheticDataset(**dset2_args)
+            )
 
             # Concatenate the datasets in memory first as reference
             union_from_mem_to_mem = UnionDataset(save_path=save_path,
@@ -472,6 +526,14 @@ class TestUnionDataset(TestCase):
                                                 data_target='memory',
                                                 gene_datasets=[dset1, dset2])
 
+            union_from_mem_to_mem_perturb = UnionDataset(save_path=save_path,
+                                                         low_memory=True,
+                                                         ignore_batch_annotation=False)
+            union_from_mem_to_mem_perturb.build_genemap(data_source="memory", gene_datasets=[dset1, dset2])
+            union_from_mem_to_mem_perturb.join_datasets(data_source='memory',
+                                                        data_target='memory',
+                                                        gene_datasets=[dset2, dset1])
+
             # Load datasets from scvi and concatenate them in memory
             union_from_scvi_to_hdf5 = UnionDataset(save_path=save_path,
                                                    low_memory=True,
@@ -480,18 +542,7 @@ class TestUnionDataset(TestCase):
             union_from_scvi_to_hdf5.join_datasets(data_source='scvi',
                                                   data_target='hdf5',
                                                   dataset_classes=[SyntheticDataset, SyntheticDataset],
-                                                  dataset_args=[{"batch_size": 10,
-                                                                 "nb_genes": 4,
-                                                                 "n_proteins": 4,
-                                                                 "n_batches": 4,
-                                                                 "n_labels": 3,
-                                                                 "seed": 0},
-                                                                {"batch_size": 30,
-                                                                 "nb_genes": 2,
-                                                                 "n_proteins": 6,
-                                                                 "n_batches": 2,
-                                                                 "n_labels": 4,
-                                                                 "seed": 0}],
+                                                  dataset_args=[dset1_args, dset2_args],
                                                   out_filename="test_concat.h5"
                                                   )
 
@@ -507,17 +558,128 @@ class TestUnionDataset(TestCase):
                 (
                     union_from_scvi_to_hdf5.X[random_indices] ==
                     union_from_mem_to_mem.X[random_indices].toarray()
+                ).all() or (
+                    union_from_scvi_to_hdf5.X[random_indices] ==
+                    union_from_mem_to_mem_perturb.X[random_indices].toarray()
                 ).all()
             )
 
             self.assertTrue((union_from_scvi_to_hdf5.gene_names == union_from_mem_to_mem.gene_names).all())
             self.assertTrue((union_from_scvi_to_hdf5.cell_types == union_from_mem_to_mem.cell_types).all())
-            self.assertTrue((union_from_scvi_to_hdf5.batch_indices == union_from_mem_to_mem.batch_indices).all())
-            self.assertTrue((union_from_scvi_to_hdf5.labels == union_from_mem_to_mem.labels).all())
+            self.assertTrue(
+                (union_from_scvi_to_hdf5.batch_indices ==
+                 union_from_mem_to_mem.batch_indices
+                 ).all() or (
+                    union_from_scvi_to_hdf5.batch_indices ==
+                    union_from_mem_to_mem_perturb.batch_indices
+                ).all()
+            )
+            self.assertTrue(
+                (union_from_scvi_to_hdf5.labels ==
+                 union_from_mem_to_mem.labels
+                 ).all() or (
+                    union_from_scvi_to_hdf5.labels ==
+                    union_from_mem_to_mem_perturb.labels
+                ).all()
+            )
+            unsupervised_training_one_epoch(union_from_scvi_to_hdf5)
 
         except Exception as e:
             if os.path.exists(os.path.join(save_path, "test_concat.h5")):
                 os.remove(os.path.join(save_path, "test_concat.h5"))
+            raise e
+
+    def test_concatenate_from_scvi_to_loom(self):
+        try:
+            random_seed = 0
+            dset1_args = {"batch_size": 10,
+                          "nb_genes": 4,
+                          "n_proteins": 4,
+                          "n_batches": 4,
+                          "n_labels": 3,
+                          "seed": random_seed}
+            dset2_args = {"batch_size": 30,
+                          "nb_genes": 2,
+                          "n_proteins": 6,
+                          "n_batches": 2,
+                          "n_labels": 4,
+                          "seed": random_seed}
+            dset1, dset2 = (
+                SyntheticDataset(**dset1_args),
+                SyntheticDataset(**dset2_args)
+            )
+
+            # Concatenate the datasets in memory first as reference
+            union_from_mem_to_mem = UnionDataset(save_path=save_path,
+                                                 low_memory=True,
+                                                 ignore_batch_annotation=False)
+            union_from_mem_to_mem.build_genemap(data_source="memory", gene_datasets=[dset1, dset2])
+            union_from_mem_to_mem.join_datasets(data_source='memory',
+                                                data_target='memory',
+                                                gene_datasets=[dset1, dset2])
+
+            union_from_mem_to_mem_perturb = UnionDataset(save_path=save_path,
+                                                         low_memory=True,
+                                                         ignore_batch_annotation=False)
+            union_from_mem_to_mem_perturb.build_genemap(data_source="memory", gene_datasets=[dset1, dset2])
+            union_from_mem_to_mem_perturb.join_datasets(data_source='memory',
+                                                        data_target='memory',
+                                                        gene_datasets=[dset2, dset1])
+
+            # Load datasets from scvi and concatenate them in memory
+            union_from_scvi_to_loom = UnionDataset(save_path=save_path,
+                                                   low_memory=True,
+                                                   ignore_batch_annotation=False)
+            union_from_scvi_to_loom.build_genemap(data_source="memory", gene_datasets=[dset1, dset2])
+            union_from_scvi_to_loom.join_datasets(data_source='scvi',
+                                                  data_target='loom',
+                                                  dataset_classes=[SyntheticDataset, SyntheticDataset],
+                                                  dataset_args=[dset1_args, dset2_args],
+                                                  out_filename="test_concat.loom"
+                                                  )
+
+            self.assertTrue(len(union_from_scvi_to_loom) == (len(dset1) + len(dset2)))
+
+            random_indices = np.sort(
+                np.random.choice(
+                    np.arange(len(union_from_scvi_to_loom)),
+                    size=int(len(union_from_scvi_to_loom) / 5),
+                    replace=False))
+
+            self.assertTrue(
+                (
+                    union_from_scvi_to_loom.X[random_indices] ==
+                    union_from_mem_to_mem.X[random_indices].toarray()
+                ).all() or (
+                    union_from_scvi_to_loom.X[random_indices] ==
+                    union_from_mem_to_mem_perturb.X[random_indices].toarray()
+                ).all()
+            )
+
+            self.assertTrue((union_from_scvi_to_loom.gene_names == union_from_mem_to_mem.gene_names).all())
+            self.assertTrue((union_from_scvi_to_loom.cell_types == union_from_mem_to_mem.cell_types).all())
+            self.assertTrue(
+                (union_from_scvi_to_loom.batch_indices ==
+                 union_from_mem_to_mem.batch_indices
+                 ).all() or (
+                    union_from_scvi_to_loom.batch_indices ==
+                    union_from_mem_to_mem_perturb.batch_indices
+                ).all()
+            )
+            self.assertTrue(
+                (union_from_scvi_to_loom.labels ==
+                 union_from_mem_to_mem.labels
+                 ).all() or (
+                    union_from_scvi_to_loom.labels ==
+                    union_from_mem_to_mem_perturb.labels
+                ).all()
+            )
+
+            unsupervised_training_one_epoch(union_from_scvi_to_loom)
+
+        except Exception as e:
+            if os.path.exists(os.path.join(save_path, "test_concat.loom")):
+                os.remove(os.path.join(save_path, "test_concat.loom"))
             raise e
 
 

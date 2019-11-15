@@ -1,14 +1,18 @@
 from __future__ import annotations
 import warnings
-from scvi.dataset.dataset import *
+from scvi.dataset.dataset import GeneExpressionDataset, logger, remap_categories, CellMeasurement
+
+import numpy as np
 import pandas as pd
+import scipy.sparse as sp_sparse
+import os
+
 import torch
 from collections import defaultdict
 
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from multiprocessing import cpu_count, Lock
 
-import sys
 import re
 
 from tqdm.auto import tqdm
@@ -17,7 +21,7 @@ import loompy
 
 from inspect import getfullargspec
 
-from typing import Dict, Tuple, Any, Callable
+from typing import Dict, Tuple, Callable, Union, Iterable, List
 
 # this pattern will be used throughout the code to identify simply the scvi dataloader class
 # without the need for the scvi.dataloader prefix when converted to a str.
@@ -30,7 +34,7 @@ class UnionDataset(GeneExpressionDataset):
     """
     The UnionDataset class aims to provide a fully scVI compatible dataset concatenation API with large data support.
 
-    Among its features are 3 big ones:
+    Its 3 main features are:
         - Concatenating scVI datasets, preserving cell type labels, batch indices (if so wished), local means and vars,
           and mapping the datasets onto a common gene map.
         - Building of a common gene map either by loading it from a csv file of column structure
@@ -96,65 +100,11 @@ class UnionDataset(GeneExpressionDataset):
                 elif ext == ".loom":
                     self._union_from_loom_to_memory(in_filename=data_load_filename, as_sparse=True)
 
-    def collate_fn_base_h5(
-        self,
-        attributes_and_types,
-        indices
-    ) -> Tuple[torch.Tensor]:
-        """
-        Collate method specialization for loading the data from an hdf5 file.
-        Unlike for the loom collate method, the indices need to be first collected by associated dataset, so that h5py
-        can load all the chosen indices from each dataset at once, instead of lazily iterating over every index and
-        searching for the respective dataset anew every time.
-        """
-        indices = np.asarray(indices)
-        indices.sort()
-        self._cache_genemap()
-
-        batch = defaultdict(list)
-        h5_acc_dict = defaultdict(list)
-        for idx in indices:
-            # sort the indices by the dataset they address for faster loading
-            ds_specifier, index = self.index_to_dataset_map[idx]
-            h5_acc_dict[ds_specifier].append(index)
-        for ds_specifier, ds_indices in h5_acc_dict.items():
-            for attr, dtype in attributes_and_types.items():
-                if attr == "X":
-                    elems = list(getattr(self, attr)[ds_indices])
-                    elems = np.vstack(elems).astype(dtype)
-                    col_indices, mappable_gene_ind = self.dataset_to_genemap_cache[ds_specifier]
-                    elems = self.map_data(elems,
-                                          mappable_genes_indices=mappable_gene_ind,
-                                          col_indices=col_indices
-                                          )
-                    batch[attr].append(elems)
-                else:
-                    elems = getattr(self, attr)[ds_indices]
-                    batch[attr].append(np.asarray(elems).astype(dtype))
-
-        batch_out = []
-        for _, elems in batch.items():
-            batch_out.append(torch.from_numpy(np.vstack(elems)))
-        return tuple(batch_out)
-
-    def collate_fn_base_loom(
-        self,
-        attributes_and_types,
-        indices
-    ) -> Tuple[torch.Tensor]:
-        """
-        Collate function specialization for loading the data from a loom file.
-        """
-        indices = np.asarray(indices)
-        indices.sort()
-
-        batch = []
-
-        for attr, dtype in attributes_and_types.items():
-            elems = getattr(self, attr)[indices]
-            batch.append(torch.from_numpy(elems.astype(dtype)))
-
-        return tuple(batch)
+    #############################
+    #                           #
+    #     Public Interface      #
+    #                           #
+    #############################
 
     def build_genemap(
         self,
@@ -289,10 +239,10 @@ class UnionDataset(GeneExpressionDataset):
 
     def map_data(
         self,
-        data,
-        gene_names=None,
-        mappable_genes_indices=None,
-        col_indices=None
+        data: Union[np.ndarray, sp_sparse.csr_matrix],
+        gene_names: np.ndarray = None,
+        mappable_genes_indices: np.ndarray = None,
+        col_indices: np.ndarray = None
     ) -> Union[np.ndarray, sp_sparse.lil_matrix]:
         """
         Maps single cell data gene wise onto a predefined gene map.
@@ -321,7 +271,10 @@ class UnionDataset(GeneExpressionDataset):
         # actual data mapping now
         if isinstance(data, np.ndarray):
             data_out = np.zeros((data.shape[0], self.gene_names_len), dtype=data.dtype)
-            data_out[:, col_indices] = data[:, mappable_genes_indices]
+            try:
+                data_out[:, col_indices] = data[:, mappable_genes_indices]
+            except Exception as e:
+                p = 3
         else:
             data_out = sp_sparse.csr_matrix(([], ([], [])), shape=(0, self.gene_names_len), dtype=data.dtype)
             nr_rows = 5000
@@ -375,9 +328,9 @@ class UnionDataset(GeneExpressionDataset):
             self.low_memory = True
             filename, ext = os.path.splitext(self.data_load_filename)
             if ext == ".h5":
-                self.collate_fn_base = self.collate_fn_base_h5
+                self.collate_fn_base = self._collate_fn_base_h5
             elif ext == ".loom":
-                self.collate_fn_base = self.collate_fn_base_loom
+                self.collate_fn_base = self._collate_fn_base_loom
         else:
             self.low_memory = False
             self.collate_fn_base = super(UnionDataset, self).collate_fn_base
@@ -385,14 +338,14 @@ class UnionDataset(GeneExpressionDataset):
 
     def set_data_load_filename(
         self,
-        filename
+        filename: str
     ) -> UnionDataset:
         self.data_load_filename = filename
         return self
 
     def set_data_save_filename(
         self,
-        filename
+        filename: str
     ) -> UnionDataset:
         self.data_save_filename = filename
         return self
@@ -404,31 +357,63 @@ class UnionDataset(GeneExpressionDataset):
         self.ignore_batch_annotation = ignore_batch_annotation
         return self
 
-    def compute_library_size_batch(self):
-        """
-        Computes the library size per batch. Overrides base method with a method that practically avoids computing the
-        library size for the low memmory setting, because computing library size for data stemming from out of memory is
-        incredibly slow.
+    #############################
+    #                           #
+    #       Internal Logic      #
+    #                           #
+    #############################
 
-        More a hotfix than a smart solution.
+    def _collate_fn_base_h5(
+        self,
+        attributes_and_types: Dict,
+        indices: Iterable
+    ) -> Tuple[torch.Tensor]:
         """
-        if not self.low_memory:
-            self.local_means = np.zeros((self.nb_cells, 1))
-            self.local_vars = np.zeros((self.nb_cells, 1))
-            for i_batch in range(self.n_batches):
-                idx_batch = np.squeeze(self.batch_indices == i_batch)
-                self.local_means[idx_batch], \
-                self.local_vars[idx_batch] = self._compute_library_size(self.X[idx_batch],
-                                                                        batch_size=len(idx_batch))
-            self.cell_attribute_names.update(["local_means", "local_vars"])
+        Collate method specialization for loading the data from an hdf5 file.
+        Unlike for the loom collate method, the indices need to be first collected by associated dataset, so that h5py
+        can load all the chosen indices from each dataset at once, instead of lazily iterating over every index and
+        searching for the respective dataset anew every time.
+        """
+        indices = np.asarray(indices)
+        indices.sort()
+        self._cache_genemap()
+
+        batch = defaultdict(list)
+        for attr, dtype in attributes_and_types.items():
+            elems = getattr(self, attr)[indices].astype(dtype)
+            batch[attr].append(np.asarray(elems).astype(dtype))
+
+        batch_out = []
+        for _, elems in batch.items():
+            batch_out.append(torch.from_numpy(np.vstack(elems)))
+        return tuple(batch_out)
+
+    def _collate_fn_base_loom(
+        self,
+        attributes_and_types,
+        indices
+    ) -> Tuple[torch.Tensor]:
+        """
+        Collate function specialization for loading the data from a loom file.
+        """
+        indices = np.asarray(indices)
+        indices.sort()
+
+        batch = []
+
+        for attr, dtype in attributes_and_types.items():
+            elems = getattr(self, attr)[indices]
+            batch.append(torch.from_numpy(elems.astype(dtype)))
+
+        return tuple(batch)
 
     def _set_attributes(
         self,
         data_filename: str = None
-    ) -> UnionDataset:
+    ):
         """
         Set the attributes correctly after having concatenated datasets. This sets the data attribute ``X`` depending
-        on the datafile extension, i.e. either the metaloaders for loom or hdf5, if needed.
+        on the datafile extension, i.e. either of the metaloaders for loom or hdf5, if needed.
         """
         if data_filename is None:
             data_filename = self.data_load_filename
@@ -441,21 +426,21 @@ class UnionDataset(GeneExpressionDataset):
             self._fill_index_map()
             self._cache_genemap()
             # get the info for all shapes of the datasets
-            self.batch_indices, n_batches = load_batch_indices_from_hdf5(
+            self.batch_indices, n_batches = self._load_batch_indices_from_hdf5(
                 h5_filepath=filepath,
                 attr_map=self.dataset_to_index_map
             )
 
-            self.labels, self.cell_types = load_labels_from_hdf5(
+            self.labels, self.cell_types = self._load_labels_from_hdf5(
                 h5_filepath=filepath,
                 attr_map=self.dataset_to_index_map
             )
 
-            self.local_means, self.local_vars = load_local_means_vars_from_hdf5(
+            self.local_means, self.local_vars = self._load_local_means_vars_from_hdf5(
                 h5_filepath=filepath,
                 attr_map=self.dataset_to_index_map)
 
-            self.X = AttrLoaderh5(
+            self.X = DataLoaderh5(
                 "X",
                 parent=self,
                 h5_filepath=filepath,
@@ -484,7 +469,7 @@ class UnionDataset(GeneExpressionDataset):
                 gene_names = ds.ra["Gene"]
                 if np.any(gene_names != self.gene_names):
                     raise ValueError("Chosen gene map and dataset genes are not equal.")
-                self.X = AttrLoaderLoom(filepath)
+                self.X = DataLoaderLoom(filepath)
                 self.batch_indices = ds.ca["BatchID"]
                 self.labels = ds.ca["ClusterID"]
                 self.cell_types = ds.attrs["CellTypes"]
@@ -500,25 +485,6 @@ class UnionDataset(GeneExpressionDataset):
                     self.local_means = ds.ca["LocalMeans"]
                     self.local_vars = ds.ca["LocalVars"]
                 self.name = ds.attrs["DatasetName"]
-
-        return
-
-    def _compute_library_size(
-        self,
-        data,
-        batch_size=None
-    ):
-        if self.low_memory:
-            logger.warn("Library size computation ignored in low memory mode. "
-                        "Ensure you have loaded the local means and vars!")
-        else:
-            sum_counts = data.sum(axis=1)
-            log_counts = np.log(sum_counts)
-            m = np.mean(log_counts)
-            v = np.var(log_counts)
-
-            return np.array(m).astype(np.float32).reshape(-1, 1), \
-                   np.array(v).reshape(-1, 1).astype(np.float32)
 
     def _fill_index_map(self) -> None:
         """
@@ -544,12 +510,11 @@ class UnionDataset(GeneExpressionDataset):
                     curr_index_len = len(self.index_to_dataset_map)
                     self.dataset_to_index_map[group_name] = [curr_index_len + i for i in range(shape[0])]
                     self.index_to_dataset_map.extend([(group_name, i) for i in range(shape[0])])
-        return
 
     def _cache_genemap(
         self,
         force_redo: bool = False
-    ) -> UnionDataset:
+    ):
         """
         Compute the mapping of the gene names of each dataset inside the hdf5 file. Useful for faster data mapping when
         loading from file later in training.
@@ -576,7 +541,6 @@ class UnionDataset(GeneExpressionDataset):
                     col_indices = self.gene_map[mappable_genes].values
                     col_indices.sort()
                     self.dataset_to_genemap_cache[group_name] = (col_indices, mappable_genes_indices.flatten())
-        return
 
     def _load_dataset(
         self,
@@ -594,7 +558,6 @@ class UnionDataset(GeneExpressionDataset):
             ds_args.update({"save_path": self.save_path})
 
         dataset = ds_class(**ds_args)
-
         return dataset, ds_class, dataset.name
 
     def _build_genemap_from_self(
@@ -1009,9 +972,11 @@ class UnionDataset(GeneExpressionDataset):
         n_batch_offset = 0
 
         for dataset in tqdm(gene_datasets, desc="Concatenating datasets"):
-            n_batch_offset = self.extract_content(dataset, containers, n_batch_offset, shared_batches)
+            n_batch_offset = self._extract_content(dataset, containers, n_batch_offset, shared_batches)
 
         labels = np.concatenate(containers["labels"])
+        containers["local_means"] = np.concatenate(containers["local_means"])
+        containers["local_vars"] = np.concatenate(containers["local_vars"])
         containers["cell_types"] = np.sort(np.unique(labels))
         containers["labels"], _ = remap_categories(labels, containers["cell_types"])
         containers["X"] = sp_sparse.vstack(
@@ -1076,18 +1041,18 @@ class UnionDataset(GeneExpressionDataset):
                  for ds_class, ds_args in zip(dataset_classes, dataset_args))
             )
             for future in as_completed(futures):
-                res = future.result()
-                dataset, _, _ = res
-
                 ###################
                 _LOCK.acquire()
 
-                n_batch_offset = self.extract_content(dataset, containers, n_batch_offset, shared_batches)
+                dataset = future.result()[0]
+                n_batch_offset = self._extract_content(dataset, containers, n_batch_offset, shared_batches)
 
                 _LOCK.release()
                 ###################
 
         labels = np.concatenate(containers["labels"])
+        containers["local_means"] = np.concatenate(containers["local_means"])
+        containers["local_vars"] = np.concatenate(containers["local_vars"])
         containers["cell_types"] = np.sort(np.unique(labels))
         containers["labels"], _ = remap_categories(labels, containers["cell_types"])
         containers["X"] = sp_sparse.vstack(
@@ -1116,9 +1081,7 @@ class UnionDataset(GeneExpressionDataset):
             else:
                 raise ValueError("No filename to write to provided.")
 
-        _, ext = os.path.splitext(out_filename)
-        if ext != ".h5":
-            logger.warn(f"Chosen file type is 'hdf5', but provided ending is: '{ext}' versus expected ending: '.h5'.")
+        self._check_extension(out_filename, ".h5")
 
         with h5py.File(os.path.join(self.save_path, out_filename), 'w') as h5file:
             # just opening the file to overwrite any existing content and enabling sub-function to simply append
@@ -1144,7 +1107,83 @@ class UnionDataset(GeneExpressionDataset):
                 lock.acquire()
                 self._write_dataset_to_hdf5(out_filename, dataset, dataset_class, dataset_fname)
                 lock.release()
-        print(f"conversion completed to file '{out_filename}.h5'")
+        print(f"conversion completed to file '{out_filename}'")
+        self._set_attributes(out_filename)
+
+    def _union_from_scvi_to_loom(
+        self,
+        dataset_classes,
+        dataset_args=None,
+        out_filename=None
+    ):
+        """
+        Combines multiple unlabelled gene_datasets based on a mapping of gene names. Stores the final
+        dataset onto a loom file with filename ``out_filename``.
+        :param dataset_classes: List, list of class-initializers of scvi GeneExpression datasets
+        :param dataset_args: List, list of further positional arguments for when loading the datasets
+        :param out_filename: str, name of the file to which to write.
+        """
+        if out_filename is None:
+            if self.data_save_filename is not None:
+                out_filename = self.data_save_filename
+            else:
+                raise ValueError("No filename to write to provided.")
+
+        self._check_extension(out_filename, ".loom")
+
+        with loompy.new(os.path.join(self.save_path, out_filename)) as dsout:
+            dsout.attrs.CellTypes = ['undefined']
+            dsout.attrs.DatasetName = ""
+
+            if dataset_args is None:
+                dataset_args = [{}] * len(dataset_classes)
+
+            counts = []
+
+            lock = Lock()
+            with ThreadPoolExecutor() as executor:
+                futures = list(
+                    (executor.submit(self._load_dataset,
+                                     ds_class,
+                                     ds_args
+                                     )
+                     for ds_class, ds_args in zip(dataset_classes, dataset_args))
+                )
+                futures_pbar = tqdm(as_completed(futures))
+                for future in futures_pbar:
+                    lock.acquire()
+
+                    res = future.result()
+                    dataset, dataset_class, dataset_fname = res
+                    dataset_class_str = self._dataset_class_str(type(dataset))
+                    futures_pbar.set_description(f"Writing dataset '{dataset_class_str} - {dataset.name}' to loom file")
+
+                    self._write_dataset_to_loom(dsout, dataset, type(dataset))
+
+                    counts.append(np.array(dataset.X.sum(axis=1)).flatten())
+
+                    lock.release()
+
+            log_counts = np.log(np.concatenate(counts))
+            total_lm = np.mean(log_counts).reshape(-1, 1).astype(np.float32)
+            total_lv = np.var(log_counts).reshape(-1, 1).astype(np.float32)
+            dsout.attrs.LocalMeanCompleteDataset = total_lm
+            dsout.attrs.LocalVarCompleteDataset = total_lv
+
+            cts = dsout.attrs.CellTypes[:]
+            labels = dsout.ca["ClusterID"][:]
+            if (labels > 0).all():
+                labels = cts[labels]
+                # there are no undefined cell types in the data. Removing this label.
+                cts = np.sort(cts[cts != "undefined"])
+            else:
+                labels = cts[labels]
+                cts.sort()
+            labels, _ = remap_categories(original_categories=labels, mapping_from=cts)
+            dsout.attrs.CellTypes = cts
+            dsout.ca["ClusterID"] = labels
+
+        print(f"conversion completed to file '{out_filename}'")
         self._set_attributes(out_filename)
 
     def _union_from_hdf5_to_memory(
@@ -1196,6 +1235,8 @@ class UnionDataset(GeneExpressionDataset):
                         containers["labels"].append(np.repeat("undefined", len(bis)))
 
         labels = np.concatenate(containers["labels"])
+        containers["local_means"] = np.concatenate(containers["local_means"])
+        containers["local_vars"] = np.concatenate(containers["local_vars"])
         containers["cell_types"] = np.sort(np.unique(labels))
         containers["labels"], _ = remap_categories(labels, containers["cell_types"])
         containers["X"] = sp_sparse.vstack(containers["X"])
@@ -1544,7 +1585,36 @@ class UnionDataset(GeneExpressionDataset):
         self._set_attributes(in_filename)
         return
 
-    def extract_content(
+    #############################
+    #                           #
+    #          utils            #
+    #                           #
+    #############################
+
+    @staticmethod
+    def _check_extension(out_filename, expected):
+        _, ext = os.path.splitext(out_filename)
+        if ext != expected:
+            logger.warn(f"Provided file type is '{ext}', but expected: '{expected}'.")
+
+    def _compute_library_size(
+        self,
+        data,
+        batch_size=None
+    ):
+        if self.low_memory:
+            logger.warn("Library size computation ignored in low memory mode. "
+                        "Ensure you have loaded the local means and vars!")
+        else:
+            sum_counts = data.sum(axis=1)
+            log_counts = np.log(sum_counts)
+            m = np.mean(log_counts)
+            v = np.var(log_counts)
+
+            return np.array(m).astype(np.float32).reshape(-1, 1), \
+                   np.array(v).reshape(-1, 1).astype(np.float32)
+
+    def _extract_content(
         self,
         dataset,
         containers,
@@ -1588,6 +1658,106 @@ class UnionDataset(GeneExpressionDataset):
         else:
             containers["labels"].append(np.repeat("undefined", len(bis)))
         return n_batch_offset
+
+    @staticmethod
+    def _compute_nr_datapoints_in_hdf5(h5_filepath):
+        nr_data_entries = 0
+        with h5py.File(h5_filepath, "r") as h5file:
+            for group_name, group in h5file["Datasets"].items():
+                nr_data_entries += group["X"].shape[0]
+
+        return nr_data_entries
+
+    @staticmethod
+    def _load_local_means_vars_from_hdf5(h5_filepath,
+                                         attr_map,
+                                         ):
+        nr_datapoints = UnionDataset._compute_nr_datapoints_in_hdf5(h5_filepath)
+        local_means = np.zeros(nr_datapoints, dtype=np.float32)
+        local_vars = np.zeros(nr_datapoints, dtype=np.float32)
+
+        with h5py.File(h5_filepath, "r") as h5file:
+            for group_name, group in h5file["Datasets"].items():
+                lms, lvs = group["local_means"][:], group["local_vars"][:]
+                this_dset_indices = np.array(attr_map[group_name])
+                local_means[this_dset_indices] = lms.flatten()
+                local_vars[this_dset_indices] = lvs.flatten()
+
+        return local_means, local_vars
+
+    @staticmethod
+    def _load_batch_indices_from_hdf5(h5_filepath,
+                                      attr_map
+                                      ):
+        batch_indices = np.zeros(UnionDataset._compute_nr_datapoints_in_hdf5(h5_filepath), dtype=np.int64)
+        with h5py.File(h5_filepath, "r") as h5file:
+            curr_offset = 0
+            for group_name, group in h5file["Datasets"].items():
+                bis = group["batch_indices"][:].flatten()
+                this_dset_indices = attr_map[group_name]
+                batch_indices[this_dset_indices] = bis + curr_offset
+                curr_offset += bis.max() + 1
+        n_batches = len(np.unique(batch_indices).astype(np.int64))
+        return batch_indices, n_batches
+
+    @staticmethod
+    def _load_labels_from_hdf5(h5_filepath,
+                               attr_map
+                               ):
+        labels = np.zeros(UnionDataset._compute_nr_datapoints_in_hdf5(h5_filepath), dtype=np.int64)
+        known_cts = ["undefined"]  # known cell types
+        with h5py.File(h5_filepath, "r") as h5file:
+            for group_name, group in h5file["Datasets"].items():
+                lbs = group["labels"][:]
+                if lbs.sum() == 0:
+                    continue
+                cts = group["cell_types"][:]
+                lbs = cts[lbs]
+                # append cell type only if unknown
+                for ct in cts:
+                    if ct not in known_cts:
+                        known_cts.append(ct)
+                # remap from ["endothelial_cell", "B_cell", "B_cell", ...] to [3, 5, 3, ...]
+                for cat_from, cat_to in zip(cts, [known_cts.index(ct) for ct in cts]):
+                    lbs[lbs == cat_from] = cat_to
+
+                this_dataset_indices = np.array(attr_map[group_name])
+                labels[this_dataset_indices] = lbs.flatten()
+        if (labels > 0).all():
+            # there are no undefined cell types
+            known_cts.remove("undefined")
+            labels -= 1  # reduce the label of all cells by 1
+        labels = np.array(known_cts)[labels]
+        known_cts = np.sort(known_cts)
+        labels, _ = remap_categories(labels, mapping_from=known_cts)
+        labels = labels.reshape(-1, 1)
+        cell_types = np.array(known_cts)
+        return labels, cell_types
+
+    #############################
+    #                           #
+    #   Base methods override   #
+    #                           #
+    #############################
+
+    def compute_library_size_batch(self):
+        """
+        Computes the library size per batch. Overrides base method with a method that practically avoids computing the
+        library size for the low memmory setting, because computing library size for data stemming from out of memory is
+        incredibly slow.
+
+        More a hotfix than a smart solution.
+        """
+        if not self.low_memory:
+            self.local_means = np.zeros((self.nb_cells, 1))
+            self.local_vars = np.zeros((self.nb_cells, 1))
+            for i_batch in range(self.n_batches):
+                idx_batch = np.squeeze(self.batch_indices == i_batch)
+                self.local_means[idx_batch], self.local_vars[idx_batch] = self._compute_library_size(
+                    self.X[idx_batch],
+                    batch_size=len(idx_batch)
+                )
+            self.cell_attribute_names.update(["local_means", "local_vars"])
 
     def populate_from_data(
         self,
@@ -1664,7 +1834,7 @@ class UnionDataset(GeneExpressionDataset):
     @X.setter
     def X(
         self,
-        X: Union[np.ndarray, sp_sparse.csr_matrix, AttrLoaderh5, AttrLoaderLoom]
+        X: Union[np.ndarray, sp_sparse.csr_matrix, DataLoaderh5, DataLoaderLoom]
     ):
         """Sets the data attribute ``X`` without recomputing the library size."""
         n_dim = len(X.shape)
@@ -1677,7 +1847,7 @@ class UnionDataset(GeneExpressionDataset):
         self._X = X
 
 
-class AttrLoaderh5:
+class DataLoaderh5:
     def __init__(self,
                  attr,
                  parent,
@@ -1686,8 +1856,7 @@ class AttrLoaderh5:
         self.attr = attr
         self.parent = parent
         self.h5_filepath = h5_filepath
-        self.attr_map = None
-        self.set_attr_map(attr_map)
+        self.attr_map = attr_map
         self.shape = 0
         with h5py.File(self.h5_filepath, "r") as h5file:
             for group_name, group in h5file["Datasets"].items():
@@ -1698,107 +1867,34 @@ class AttrLoaderh5:
         return self.shape[0]
 
     def __getitem__(self, idx: Union[List, np.ndarray]):
-        data = []
         if np.array(idx).dtype == bool:
             idx = np.arange(len(self.attr_map))[idx]
+        data = self.load_data(idx)
+        return np.vstack(data)
 
+    def load_data(self, indices, map_data=True):
         datasets_to_indices = defaultdict(list)
-        for i in np.atleast_1d(idx):
+        data = []
+        for i in np.atleast_1d(indices):
             dset, i = self.attr_map[i]
             datasets_to_indices[dset].append(i)
-
         with h5py.File(self.h5_filepath, "r") as h5_file:
             datasets = h5_file["Datasets"]
             for ds_specifier, indices in datasets_to_indices.items():
                 group = datasets[ds_specifier]
-                data.append(
-                    self.parent.map_data(
-                        group[self.attr][indices],
-                        group["gene_names"][:].astype(str)
+                loaded_data = group[self.attr][indices]
+                col_indices, mappable_gene_ind = self.parent.dataset_to_genemap_cache[ds_specifier]
+                if map_data:
+                    loaded_data = self.parent.map_data(
+                        loaded_data,
+                        mappable_genes_indices=mappable_gene_ind,
+                        col_indices=col_indices
                     )
-                )
+                data.append(loaded_data)
         return np.vstack(data)
 
-    def set_attr_map(self, attr_map):
-        self.attr_map = attr_map
 
-
-def compute_nr_datapoints_in_hdf5(h5_filepath):
-    nr_data_entries = 0
-    with h5py.File(h5_filepath, "r") as h5file:
-        for group_name, group in h5file["Datasets"].items():
-            nr_data_entries += group["X"].shape[0]
-
-    return nr_data_entries
-
-
-def load_local_means_vars_from_hdf5(h5_filepath,
-                                    attr_map,
-                                    ):
-    nr_datapoints = compute_nr_datapoints_in_hdf5(h5_filepath)
-    local_means = np.zeros(nr_datapoints, dtype=np.float32)
-    local_vars = np.zeros(nr_datapoints, dtype=np.float32)
-
-    with h5py.File(h5_filepath, "r") as h5file:
-        for group_name, group in h5file["Datasets"].items():
-            lms, lvs = group["local_means"][:], group["local_vars"][:]
-            this_dset_indices = np.array(attr_map[group_name])
-            local_means[this_dset_indices] = lms.flatten()
-            local_vars[this_dset_indices] = lvs.flatten()
-
-    return local_means, local_vars
-
-
-def load_batch_indices_from_hdf5(h5_filepath,
-                                 attr_map
-                                 ):
-    batch_indices = np.zeros(compute_nr_datapoints_in_hdf5(h5_filepath), dtype=np.int64)
-    with h5py.File(h5_filepath, "r") as h5file:
-        curr_offset = 0
-        for group_name, group in h5file["Datasets"].items():
-            bis = group["batch_indices"][:].flatten()
-            this_dset_indices = attr_map[group_name]
-            batch_indices[this_dset_indices] = bis + curr_offset
-            curr_offset += bis.max() + 1
-    n_batches = len(np.unique(batch_indices).astype(np.int64))
-    return batch_indices, n_batches
-
-
-def load_labels_from_hdf5(h5_filepath,
-                          attr_map
-                          ):
-    labels = np.zeros(compute_nr_datapoints_in_hdf5(h5_filepath), dtype=np.int64)
-    known_cts = ["undefined"]  # known cell types
-    with h5py.File(h5_filepath, "r") as h5file:
-        for group_name, group in h5file["Datasets"].items():
-            lbs = group["labels"][:]
-            if lbs.sum() == 0:
-                continue
-            cts = group["cell_types"][:]
-            lbs = cts[lbs]
-            # append cell type only if unknown
-            for ct in cts:
-                if ct not in known_cts:
-                    known_cts.append(ct)
-            # remap from ["endothelial_cell", "B_cell", "B_cell", ...] to [3, 5, 3, ...]
-            for cat_from, cat_to in zip(cts, [known_cts.index(ct) for ct in cts]):
-                lbs[lbs == cat_from] = cat_to
-
-            this_dataset_indices = np.array(attr_map[group_name])
-            labels[this_dataset_indices] = lbs.flatten()
-    if (labels > 0).all():
-        # there are no undefined cell types
-        known_cts.remove("undefined")
-        labels -= 1  # reduce the label of all cells by 1
-    labels = np.array(known_cts)[labels]
-    known_cts = np.sort(known_cts)
-    labels, _ = remap_categories(labels, mapping_from=known_cts)
-    labels = labels.reshape(-1, 1)
-    cell_types = np.array(known_cts)
-    return labels, cell_types
-
-
-class AttrLoaderLoom:
+class DataLoaderLoom:
     def __init__(self,
                  loom_filepath=None, ):
         self.loom_filepath = loom_filepath

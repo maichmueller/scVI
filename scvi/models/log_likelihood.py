@@ -120,7 +120,7 @@ def compute_marginal_log_likelihood_scvi(vae, posterior, n_samples_mc=100):
             q_z_x = Normal(qz_m, qz_v.sqrt()).log_prob(z).sum(dim=-1)
             q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
 
-                to_sum[:, i] = (p_z + p_l + p_x_zl - q_z_x - q_l_x).cpu()
+            to_sum[:, i_batch] = (p_z + p_l + p_x_zl - q_z_x - q_l_x).cpu()
 
             batch_log_lkl = logsumexp(to_sum, dim=-1) - np.log(n_samples_mc)
             log_lkl += torch.sum(batch_log_lkl).item()

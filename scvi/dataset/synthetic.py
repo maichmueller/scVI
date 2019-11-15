@@ -3,6 +3,7 @@ import os
 import pickle
 
 import numpy as np
+from numpy.random import RandomState
 
 from scvi.dataset.dataset import (
     GeneExpressionDataset,
@@ -25,14 +26,17 @@ class SyntheticDataset(GeneExpressionDataset):
     ):
         super().__init__()
         if seed is not None:
-            np.random.seed(seed)
+            rs = np.random.RandomState(seed)
+        else:
+            rs = np.random.RandomState()
         # Generating samples according to a ZINB process
-        data = np.random.negative_binomial(
+        data = rs.negative_binomial(
             5, 0.3, size=(n_batches, batch_size, nb_genes)
         )
-        mask = np.random.binomial(n=1, p=0.7, size=(n_batches, batch_size, nb_genes))
+
+        mask = rs.binomial(n=1, p=0.7, size=(n_batches, batch_size, nb_genes))
         data = data * mask  # We put the batch index first
-        labels = np.random.randint(0, n_labels, size=(n_batches, batch_size, 1))
+        labels = rs.randint(0, n_labels, size=(n_batches, batch_size, 1))
         cell_types = ["undefined_%d" % i for i in range(n_labels)]
 
         self.populate_from_per_batch_list(
@@ -41,6 +45,7 @@ class SyntheticDataset(GeneExpressionDataset):
             gene_names=np.arange(nb_genes).astype(np.str),
             cell_types=cell_types,
         )
+
         # clear potentially unused cell_types
         self.remap_categorical_attributes()
 
