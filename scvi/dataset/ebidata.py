@@ -18,14 +18,16 @@ from tqdm import tqdm
 
 
 class EbiData(AnnDatasetFromAnnData):
-    def __init__(self,
-                 save_path,
-                 experiment="E-ENAD-15",
-                 result_file="filtered",
-                 filter_boring: bool = False,
-                 cell_types_column_name="Sample Characteristic[inferred cell type]",
-                 batch_indices_column_name="",
-                 labels_column_name=""):
+    def __init__(
+        self,
+        save_path,
+        experiment="E-ENAD-15",
+        result_file="filtered",
+        filter_boring: bool = False,
+        cell_types_column_name="Sample Characteristic[inferred cell type]",
+        batch_indices_column_name="",
+        labels_column_name="",
+    ):
         settings = ScanpyConfig()
         settings.datasetdir = save_path
         if not path.isdir(save_path):
@@ -34,8 +36,9 @@ class EbiData(AnnDatasetFromAnnData):
         if not path.isdir(filepath):
             os.mkdir(filepath)
 
-        if not path.isfile(path.join(filepath, "experimental_design.tsv")) \
-            or not path.isfile(path.join(filepath, "expression_archive.zip")):
+        if not path.isfile(
+            path.join(filepath, "experimental_design.tsv")
+        ) or not path.isfile(path.join(filepath, "expression_archive.zip")):
 
             experiment_dir = settings.datasetdir / experiment
             dataset_path = experiment_dir / "{}.h5ad".format(experiment)
@@ -69,13 +72,17 @@ class EbiData(AnnDatasetFromAnnData):
                 adata.obs = _filter_boring(adata.obs)
         # for i, barcode in enumerate(pd.unique(adata.obs["batch_indices"])):
         #     adata.obs["batch_indices"][adata.obs["batch_indices"] == barcode] = i
-        super().__init__(adata,
-                         cell_types_column_name=cell_types_column_name,
-                         batch_indices_column_name=batch_indices_column_name,
-                         labels_column_name=labels_column_name)
+        super().__init__(
+            adata,
+            cell_types_column_name=cell_types_column_name,
+            batch_indices_column_name=batch_indices_column_name,
+            labels_column_name=labels_column_name,
+        )
         self.name = experiment
 
+
 # incompatability of data reader in original scanpy with mouse dataset. Patching with hotfix
+
 
 def read_archive(data_folderpath):
     with ZipFile(path.join(data_folderpath, "expression_archive.zip"), "r") as f:
@@ -159,12 +166,13 @@ def sniff_url(accession):
         raise
 
 
-def download_experiment(accession,
-                        result_file="filtered"):
+def download_experiment(accession, result_file="filtered"):
     sniff_url(accession)
 
     base_url = "https://www.ebi.ac.uk/gxa/sc/experiment/{}/".format(accession)
-    quantification_path = f"download/zip?fileType=quantification-{result_file}&accessKey="
+    quantification_path = (
+        f"download/zip?fileType=quantification-{result_file}&accessKey="
+    )
     sampledata_path = "download?fileType=experiment-design&accessKey="
 
     experiment_dir = scanpy.settings.datasetdir / accession
